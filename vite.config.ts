@@ -2,4 +2,4 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import {previewPlugin} from './scripts/preview-plugin';
-export default defineConfig({plugins:[react(),previewPlugin(process.cwd())],clearScreen:false,server:{port:1437,strictPort:true,host:'127.0.0.1'},test:{environment:'jsdom',setupFiles:['./tests/ui/setup.ts'],include:['tests/ui/**/*.test.tsx','tests/ui/**/*.test.ts']}});
+export default defineConfig({plugins:[react(),previewPlugin(process.cwd())],clearScreen:false,server:{port:1437,strictPort:true,host:'127.0.0.1',watch:{ignored:['**/src-tauri/**']}},test:{environment:'jsdom',setupFiles:['./tests/ui/setup.ts'],include:['tests/ui/**/*.test.tsx','tests/ui/**/*.test.ts']}});
