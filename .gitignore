@@ -1,0 +1,19 @@
+# 개인 운영 문서와 로컬 실행·빌드 산출물을 제외합니다.
+/docs/
+/node_modules/
+/dist/
+/src-tauri/target/
+/.superpowers/
+/.worktrees/
+/.devdock-data/
+/.test-data/
+*.log
+*.tmp
+.env*
+*.pem
+*.key
+
+/src-tauri/target-*/
+
+/src-tauri/gen/
+/release/

@@ -1,0 +1,2 @@
+<!-- DevDock의 앱과 트레이 브랜드 아이콘을 정의합니다. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect x="5" y="5" width="118" height="118" rx="30" fill="#17263d"/><rect x="7" y="7" width="114" height="114" rx="28" fill="none" stroke="#7db3ff" stroke-width="3"/><path d="M49 40 26 64l23 24M79 40l23 24-23 24" fill="none" stroke="#b6d5ff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><path d="m70 37-12 54" fill="none" stroke="#6bd2bb" stroke-width="7" stroke-linecap="round"/></svg>

@@ -1,0 +1,36 @@
+{
+  "name": "devdock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test:ui": "vitest run",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "desktop": "tauri dev --features desktop",
+    "build:desktop": "tauri build --features desktop"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.10.1",
+    "echarts": "^6.0.0",
+    "lucide-react": "^0.469.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}
