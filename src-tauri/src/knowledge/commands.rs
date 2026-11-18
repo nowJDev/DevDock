@@ -10,6 +10,48 @@ use serde_json::{json, Value};
     deny_unknown_fields
 )]
 enum Command {
+    GetReportProfile {
+        project_id: String,
+    },
+    SaveReportProfile {
+        profile: Value,
+        expected_revision: i64,
+    },
+    CreateReportRequest {
+        request: Value,
+    },
+    GetReportContext {
+        request_id: String,
+    },
+    ReadReportSource {
+        request_id: String,
+        index: usize,
+        lease_token: String,
+    },
+    SubmitReportResult {
+        request_id: String,
+        lease_token: String,
+        draft: Value,
+        proofs: Value,
+    },
+    GetReportDraft {
+        request_id: String,
+    },
+    ValidateReportDraft {
+        request_id: String,
+        body: String,
+    },
+    PreviewReportSave {
+        request_id: String,
+        destination: std::path::PathBuf,
+    },
+    SaveReportDraft {
+        request_id: String,
+        body: String,
+        destination: std::path::PathBuf,
+        expected_sha256: Option<String>,
+        overwrite: bool,
+    },
     GetDocumentConfig {},
     SaveDocumentConfig {
         config: Value,
@@ -149,6 +191,7 @@ pub fn read_only(input: &Value) -> bool {
         input["command"].as_str(),
         Some(
             "get_document_config"
+                | "get_report_profile"
                 | "get_document_source_states"
                 | "list_project_documents"
                 | "read_document_version"
@@ -169,6 +212,45 @@ impl KnowledgeService {
             return Err("읽기 전용 미리보기에서는 문서와 진행 현황을 변경할 수 없습니다.".into());
         }
         match serde_json::from_value::<Command>(input).map_err(err)? {
+            Command::GetReportProfile { project_id } => self.get_report_profile(&project_id),
+            Command::SaveReportProfile {
+                profile,
+                expected_revision,
+            } => self.save_report_profile(profile, expected_revision),
+            Command::CreateReportRequest { request } => self.create_report_request(request),
+            Command::GetReportContext { request_id } => self.get_report_context(&request_id),
+            Command::ReadReportSource {
+                request_id,
+                index,
+                lease_token,
+            } => self.read_report_source(&request_id, index, &lease_token),
+            Command::SubmitReportResult {
+                request_id,
+                lease_token,
+                draft,
+                proofs,
+            } => self.submit_report_result(&request_id, &lease_token, draft, proofs),
+            Command::GetReportDraft { request_id } => self.get_report_draft(&request_id),
+            Command::ValidateReportDraft { request_id, body } => {
+                self.validate_report_draft(&request_id, &body)
+            }
+            Command::PreviewReportSave {
+                request_id,
+                destination,
+            } => self.preview_report_save(&request_id, &destination),
+            Command::SaveReportDraft {
+                request_id,
+                body,
+                destination,
+                expected_sha256,
+                overwrite,
+            } => self.save_report_draft(
+                &request_id,
+                &body,
+                &destination,
+                expected_sha256.as_deref(),
+                overwrite,
+            ),
             Command::GetDocumentConfig {} => self.get_document_config(),
             Command::SaveDocumentConfig {
                 config,
@@ -310,10 +392,16 @@ pub fn cli_request(args: &[String]) -> Result<Option<(Value, bool)>> {
             group == "knowledge-readonly",
         )));
     }
-    if !matches!(group, "documents" | "analysis" | "progress") {
+    if !matches!(group, "documents" | "analysis" | "progress" | "reports") {
         return Ok(None);
     }
     let command = match (group, args.get(1).map(String::as_str).unwrap_or("")) {
+        ("reports", "profile") => "get_report_profile",
+        ("reports", "context") => "get_report_context",
+        ("reports", "claim") => "claim_analysis_job",
+        ("reports", "heartbeat") => "heartbeat_analysis_job",
+        ("reports", "read-source") => "read_report_source",
+        ("reports", "submit") => "submit_report_result",
         ("documents", "config") => "get_document_config",
         ("documents", "save-config") => "save_document_config",
         ("documents", "source-upsert") => "upsert_document_source",
@@ -347,6 +435,19 @@ pub fn cli_request(args: &[String]) -> Result<Option<(Value, bool)>> {
     };
     let mut input = match args.get(2).map(String::as_str) {
         None => json!({}),
+        Some("--stdin") if args.len() == 3 => {
+            use std::io::Read;
+            const LIMIT: u64 = 8 * 1024 * 1024;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take(LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .map_err(err)?;
+            if bytes.len() as u64 > LIMIT {
+                return Err("input too large".into());
+            }
+            serde_json::from_slice(&bytes).map_err(err)?
+        }
         Some("--input") if args.len() == 4 => {
             let path = &args[3];
             let meta = std::fs::metadata(path).map_err(err)?;
@@ -357,7 +458,10 @@ pub fn cli_request(args: &[String]) -> Result<Option<(Value, bool)>> {
             serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(err)?
         }
         Some(text) if args.len() == 3 => serde_json::from_str(text).map_err(err)?,
-        _ => return Err("usage: documents|analysis|progress COMMAND [JSON | --input FILE]".into()),
+        _ => return Err(
+            "usage: documents|analysis|progress|reports COMMAND [JSON | --input FILE | --stdin]"
+                .into(),
+        ),
     };
     if !input.is_object() || input.get("command").is_some() {
         return Err("invalid command input".into());

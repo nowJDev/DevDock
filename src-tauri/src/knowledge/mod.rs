@@ -5,6 +5,9 @@ pub mod jobs;
 pub mod models;
 pub mod parser;
 pub mod progress;
+pub mod report_ipc;
+pub mod report_worker;
+pub mod reports;
 pub mod scanner;
 pub(crate) mod store;
 use crate::service::Engine;
@@ -20,10 +23,24 @@ pub(crate) fn now() -> String {
 #[derive(Clone)]
 pub struct KnowledgeService {
     pub(crate) engine: Engine,
+    worker: Option<std::path::PathBuf>,
 }
 impl KnowledgeService {
     pub(crate) fn new(engine: Engine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            worker: None,
+        }
+    }
+    pub fn with_worker_executable(mut self, path: std::path::PathBuf) -> Self {
+        self.worker = Some(path);
+        self
+    }
+    pub(crate) fn worker_executable(&self) -> Result<std::path::PathBuf> {
+        self.worker
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| std::env::current_exe().map_err(err))
     }
     pub(crate) fn db(&self) -> Result<Connection> {
         self.engine.db()

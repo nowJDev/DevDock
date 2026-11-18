@@ -77,6 +77,7 @@ impl Engine {
         schema.commit().map_err(err)?;
         crate::knowledge::store::initialize(&mut c)?;
         if recover {
+            crate::knowledge::reports::expire_on_start(&e.knowledge())?;
             c.execute(
                 "UPDATE runs SET state='uncertain' WHERE state='pending'",
                 [],

@@ -4,12 +4,14 @@ import {FolderPlus,FolderOpen,RefreshCw} from 'lucide-react';
 import type {Project} from '../contracts';
 import type {KnowledgeApi,SourceState} from './api';
 import type {DocumentConfigView,DocumentSource} from './contracts';
+import ReportSettings from './ReportSettings';
 const roles=[['handover','핸드오버'],['dailyLog','일자별 작업기록'],['checklist','기준 체크리스트'],['review','검토·검증 결과'],['reference','참고 문서'],['publicationReceipt','게시 영수증']];
 const states:Record<string,string>={online:'연결 정상',partial:'일부만 읽음',offline:'오프라인',denied:'접근 권한 없음',timeout:'연결 시간 초과',unknown:'아직 확인 전',error:'연결 확인 실패'};
 const message=(e:unknown)=>String(e).replace(/^Error: /,'');
 const stamp=(v?:string)=>v?new Date(v).toLocaleString('ko-KR',{hour12:false}):'아직 확인 전';
 export default function DocumentSettings({api,projects,refreshVersion}:{api:KnowledgeApi;projects:Project[];refreshVersion:number}){
  const [config,setConfig]=useState<DocumentConfigView|null>(null),[source,setSource]=useState<DocumentSource|null>(null),[interval,setIntervalValue]=useState('30'),[connection,setConnection]=useState<SourceState[]>([]),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[probing,setProbing]=useState<string|null>(null),[remoteRevision,setRemoteRevision]=useState<number|null>(null);
+ const [reportOpen,setReportOpen]=useState(false);
  const dirty=useRef(false),intervalDirty=useRef(false),revision=useRef<number|null>(null);
  useEffect(()=>{let active=true;void Promise.all([api.config(),api.sourceStates()]).then(([cfg,states])=>{if(!active)return;setConnection(states.sources);if(!dirty.current){setConfig(cfg);setIntervalValue(String(cfg.nasIntervalSec));revision.current=cfg.revision;}else if(cfg.revision!==revision.current)setRemoteRevision(cfg.revision);},e=>{if(active)setError(message(e));});return()=>{active=false;};},[api,refreshVersion]);
  function accept(cfg:DocumentConfigView){setConfig(cfg);if(!intervalDirty.current)setIntervalValue(String(cfg.nasIntervalSec));revision.current=cfg.revision;dirty.current=intervalDirty.current||source!==null;setRemoteRevision(null);}
@@ -44,5 +46,6 @@ export default function DocumentSettings({api,projects,refreshVersion}:{api:Know
    <div className="knowledge-fields"><label className="field">포함할 하위 경로<textarea rows={3} value={(source.include??[]).join('\n')} placeholder="비워 두면 모든 지원 문서" onChange={e=>change({include:e.target.value.split('\n').filter(Boolean)})}/><small>경로 접두어를 한 줄에 하나씩 입력합니다.</small></label><label className="field">제외할 하위 경로<textarea rows={3} value={(source.exclude??[]).join('\n')} onChange={e=>change({exclude:e.target.value.split('\n').filter(Boolean)})}/><small>빌드·임시 폴더와 외부 연결 폴더는 탐색에서 제외합니다.</small></label></div>
    <div className="knowledge-actions"><button type="button" className="subtle-button" onClick={()=>{setSource(null);dirty.current=intervalDirty.current;}}>문서 편집 취소</button><button className="primary-button" type="submit" disabled={busy||source.roles.length===0}>문서 폴더 저장</button></div>
   </form>}
+  {projects.some(p=>!p.archived)&&<div className="knowledge-content"><button type="button" className="subtle-button" aria-expanded={reportOpen} onClick={()=>setReportOpen(value=>!value)}>일일보고 설정</button>{reportOpen&&<ReportSettings api={api} projects={projects.filter(p=>!p.archived)} sources={config.sources}/>}</div>}
  </div>;
 }

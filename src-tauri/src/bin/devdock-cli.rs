@@ -12,7 +12,11 @@ fn revision(s: Option<&String>) -> Result<Option<u64>, String> {
 }
 fn run(engine: &Engine, args: &[String]) -> Result<Value, String> {
     if let Some((request, preview)) = devdock_core::knowledge::commands::cli_request(args)? {
-        return engine.knowledge().execute_command(request, preview, true);
+        let knowledge = engine.knowledge();
+        if !preview && request["command"] == "submit_report_result" {
+            return devdock_core::knowledge::report_ipc::submit(&knowledge, request);
+        }
+        return knowledge.execute_command(request, preview, true);
     }
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["snapshot"] => engine.snapshot(),
@@ -41,6 +45,7 @@ fn run(engine: &Engine, args: &[String]) -> Result<Value, String> {
 }
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if let [flag,path]=args.as_slice(){if flag=="--report-source-worker"{match devdock_core::knowledge::report_worker::run_report_source_worker(std::path::Path::new(path)){Ok(v)=>println!("{}",v),Err(_)=>process::exit(1)}return;}}
     if let [flag, path] = args.as_slice() {
         if flag == "--document-scan-worker" {
             if devdock_core::knowledge::scanner::run_scan_worker(std::path::Path::new(path))

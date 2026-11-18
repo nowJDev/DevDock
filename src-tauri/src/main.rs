@@ -78,6 +78,8 @@ fn listen_restore(app: tauri::AppHandle, event: usize) {
 #[cfg(not(windows))]
 fn listen_restore(_app: tauri::AppHandle, _event: usize) {}
 fn main() {
+    let worker_args:Vec<_>=std::env::args_os().skip(1).collect();
+    if let [flag,path]=worker_args.as_slice(){if flag=="--report-source-worker"{match devdock_core::knowledge::report_worker::run_report_source_worker(std::path::Path::new(path)){Ok(v)=>println!("{}",v),Err(_)=>std::process::exit(1)}return;}}
     if let Some(path) = std::env::args_os()
         .skip_while(|a| a != "--document-scan-worker")
         .nth(1)
@@ -111,6 +113,10 @@ fn main() {
                 poll_gate: Arc::new(PollGate::default()),
                 ui_ready: Arc::new(AtomicBool::new(false)),
             };
+            #[cfg(windows)]
+            if let Ok(host) = devdock_core::knowledge::report_ipc::start(engine.knowledge()) {
+                app.manage(host);
+            }
             app.manage(runtime.clone());
             engine.knowledge().start_document_scheduler();
             tray::setup(app.handle())?;
