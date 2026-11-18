@@ -338,3 +338,138 @@ fn recorded_checkout_answer_returns_action_failure_separately() {
     assert!(retry.is_err());
     assert_eq!(calls.get(), 0);
 }
+
+#[test]
+fn checkin_prompt_is_claimed_only_once_in_the_window_after_ui_is_ready() {
+    use devdock_core::runtime::claim_ready_checkin_prompt;
+    use devdock_core::service::Engine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(dir.path().to_path_buf()).unwrap();
+    let claim = |safe, ready, now| {
+        let schedule = engine.evaluate_schedule(now).unwrap();
+        claim_ready_checkin_prompt(&engine, safe, ready, &schedule).unwrap()
+    };
+    assert!(!claim(false, true, "2026-11-17T08:09:59"));
+    assert!(!claim(false, false, "2026-11-17T08:10:00"));
+    assert!(!claim(true, true, "2026-11-17T08:10:00"));
+    assert!(claim(false, true, "2026-11-17T08:10:00"));
+    assert!(!claim(false, true, "2026-11-17T08:29:59"));
+    assert!(!claim(false, true, "2026-11-18T08:30:00"));
+    assert!(engine.claim_prompt("2026-11-17").unwrap());
+
+    let reopened = Engine::open(dir.path().to_path_buf()).unwrap();
+    assert!(!reopened.claim_checkin_prompt("2026-11-17").unwrap());
+    assert!(reopened
+        .claim_run("2026-11-19", "checkIn")
+        .unwrap()
+        .is_some());
+    assert!(!reopened.claim_checkin_prompt("2026-11-19").unwrap());
+    assert!(reopened.claim_checkin_prompt("2026-11-20").unwrap());
+}
+
+#[test]
+fn checkin_response_records_only_accepted_unexpired_prompts() {
+    use devdock_core::runtime::checkin_response;
+    use devdock_core::service::Engine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(dir.path().to_path_buf()).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let mut record = || {
+        calls.set(calls.get() + 1);
+        Ok(json!({}))
+    };
+
+    assert!(checkin_response(
+        &engine,
+        false,
+        "2026-11-17",
+        true,
+        "2026-11-17T08:15:00",
+        &mut record
+    )
+    .is_err());
+    assert!(engine.claim_checkin_prompt("2026-11-17").unwrap());
+    assert!(checkin_response(
+        &engine,
+        true,
+        "2026-11-17",
+        true,
+        "2026-11-17T08:15:00",
+        &mut record
+    )
+    .is_err());
+    let declined = checkin_response(
+        &engine,
+        false,
+        "2026-11-17",
+        false,
+        "2026-11-17T08:15:00",
+        &mut record,
+    )
+    .unwrap();
+    assert_eq!(declined["answer"], false);
+    assert_eq!(declined["expired"], false);
+    assert!(checkin_response(
+        &engine,
+        false,
+        "2026-11-17",
+        true,
+        "2026-11-17T08:15:00",
+        &mut record
+    )
+    .is_err());
+
+    for (date, current) in [
+        ("2026-11-18", "2026-11-18T08:30:00"),
+        ("2026-11-19", "2026-11-20T08:15:00"),
+    ] {
+        assert!(engine.claim_checkin_prompt(date).unwrap());
+        let expired = checkin_response(&engine, false, date, true, current, &mut record).unwrap();
+        assert_eq!(expired["expired"], true);
+        assert_eq!(expired["answer"], false);
+    }
+
+    assert!(engine.claim_checkin_prompt("2026-11-21").unwrap());
+    let mut settings = engine.settings().unwrap();
+    settings["attendanceEnabled"] = json!(false);
+    let saved = engine.save_settings(settings).unwrap();
+    let disabled = checkin_response(
+        &engine,
+        false,
+        "2026-11-21",
+        true,
+        "2026-11-21T08:15:00",
+        &mut record,
+    )
+    .unwrap();
+    assert_eq!(disabled["expired"], true);
+    assert_eq!(calls.get(), 0);
+
+    let mut settings = saved;
+    settings["attendanceEnabled"] = json!(true);
+    engine.save_settings(settings).unwrap();
+    assert!(engine.claim_checkin_prompt("2026-11-22").unwrap());
+    let accepted = checkin_response(
+        &engine,
+        false,
+        "2026-11-22",
+        true,
+        "2026-11-22T08:29:59",
+        &mut record,
+    )
+    .unwrap();
+    assert_eq!(accepted["answer"], true);
+    assert_eq!(calls.get(), 1);
+    assert!(checkin_response(
+        &engine,
+        false,
+        "2026-11-22",
+        true,
+        "2026-11-22T08:29:59",
+        &mut record
+    )
+    .is_err());
+    assert_eq!(calls.get(), 1);
+}

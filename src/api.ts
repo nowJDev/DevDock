@@ -11,7 +11,9 @@ export const api:Api={
  mutate:(operation,expectedRevision)=>call('mutate_registry',{operation,expectedRevision}),
  saveSettings:(settings:Settings)=>call('save_settings',{settings}),
  history:(monitorId,hours)=>call<History>('get_history',{monitorId,hours}),
- attendance:action=>call('run_attendance',{action}),answerCheckout:(answer,promptDate)=>call('answer_checkout',{answer,promptDate}),
+ attendance:action=>call('run_attendance',{action}),
+ answerCheckin:(answer,promptDate)=>call('answer_checkin',{answer,promptDate}),
+ answerCheckout:(answer,promptDate)=>call('answer_checkout',{answer,promptDate}),
  setAutostart:enabled=>call('set_autostart',{enabled}),refresh:()=>call('refresh_now'),
  subscribe:async(name,callback)=>{if(!native())return()=>{};const {listen}=await import('@tauri-apps/api/event');return listen(name,event=>callback(event.payload));}
 };

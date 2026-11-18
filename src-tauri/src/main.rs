@@ -188,6 +188,7 @@ fn main() {
             desktop::save_settings,
             desktop::get_history,
             desktop::run_attendance,
+            desktop::answer_checkin,
             desktop::answer_checkout,
             desktop::set_autostart,
             desktop::refresh_now

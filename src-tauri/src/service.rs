@@ -47,7 +47,7 @@ impl Engine {
         let schema = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(err)?;
-        schema.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
+        schema.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS checkin_prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
         schema
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS daily_progress(
@@ -462,6 +462,20 @@ impl Engine {
         Ok(result)
     }
     pub fn claim_prompt(&self, date: &str) -> R<bool> {
+        self.claim_attendance_prompt(
+            date,
+            "checkOut",
+            "INSERT OR IGNORE INTO prompts(date) VALUES(?1)",
+        )
+    }
+    pub fn claim_checkin_prompt(&self, date: &str) -> R<bool> {
+        self.claim_attendance_prompt(
+            date,
+            "checkIn",
+            "INSERT OR IGNORE INTO checkin_prompts(date) VALUES(?1)",
+        )
+    }
+    fn claim_attendance_prompt(&self, date: &str, action: &str, insert: &str) -> R<bool> {
         NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(err)?;
         let mut c = self.db()?;
         let tx = c
@@ -469,17 +483,15 @@ impl Engine {
             .map_err(err)?;
         let existing: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM runs WHERE date=?1 AND action='checkOut')",
-                [date],
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE date=?1 AND action=?2)",
+                params![date, action],
                 |r| r.get(0),
             )
             .map_err(err)?;
         let claimed = if existing {
             false
         } else {
-            tx.execute("INSERT OR IGNORE INTO prompts(date) VALUES(?1)", [date])
-                .map_err(err)?
-                == 1
+            tx.execute(insert, [date]).map_err(err)? == 1
         };
         tx.commit().map_err(err)?;
         Ok(claimed)
@@ -488,21 +500,41 @@ impl Engine {
         self.resolve_prompt_at(date, answer, &Local::now().date_naive().to_string())
     }
     pub fn resolve_prompt_at(&self, date: &str, answer: bool, current_date: &str) -> R<Value> {
+        self.resolve_attendance_prompt(
+            date,
+            answer,
+            current_date,
+            true,
+            "UPDATE prompts SET answer=?1 WHERE date=?2 AND answer IS NULL",
+        )
+    }
+    pub fn resolve_checkin_prompt_at(&self, date: &str, answer: bool, now: &str) -> R<Value> {
+        let schedule = self.evaluate_schedule(now)?;
+        self.resolve_attendance_prompt(
+            date,
+            answer,
+            required(&schedule, "date")?,
+            schedule["checkIn"] == true,
+            "UPDATE checkin_prompts SET answer=?1 WHERE date=?2 AND answer IS NULL",
+        )
+    }
+    fn resolve_attendance_prompt(
+        &self,
+        date: &str,
+        answer: bool,
+        current_date: &str,
+        eligible: bool,
+        update: &str,
+    ) -> R<Value> {
         let target = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(err)?;
         let current = NaiveDate::parse_from_str(current_date, "%Y-%m-%d").map_err(err)?;
         if target > current {
             return Err("future prompt date".into());
         }
-        let expired = target < current;
+        let expired = target < current || !eligible;
         let answer = answer && !expired;
         let c = self.db()?;
-        if c.execute(
-            "UPDATE prompts SET answer=?1 WHERE date=?2 AND answer IS NULL",
-            params![answer, date],
-        )
-        .map_err(err)?
-            != 1
-        {
+        if c.execute(update, params![answer, date]).map_err(err)? != 1 {
             return Err("prompt not pending".into());
         }
         Ok(json!({"date":date,"answer":answer,"expired":expired}))

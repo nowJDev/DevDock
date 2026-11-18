@@ -131,6 +131,8 @@ function attendanceResult(run:AttendanceRun,action:string){
  }
 }
 const attendanceKeys=['checkIn','checkOut'] as const;
+type AttendanceAction=(typeof attendanceKeys)[number];
+type AttendancePrompt={action:AttendanceAction;date:string;returnFocus:HTMLElement|null};
 function attendanceReading(attendance:Snapshot['attendance'],key:typeof attendanceKeys[number]){
  const action=attendanceActions[key],latest=attendance.lastRunsByAction?.[key];
  const run=latest?.requestedDate===attendance.date?latest:attendance.runs.find(r=>r.action===key&&r.requestedDate===attendance.date);
@@ -157,7 +159,7 @@ function OperationsSummary({daemons,attendance}:{daemons:Daemon[];attendance:Sna
 }
 function AttendancePanel({attendance,settings,onSettings}:{attendance:Snapshot['attendance'];settings:Settings;onSettings:()=>void}){
  return <section className="panel attendance-panel" aria-labelledby="attendance-title">
-  <div className="section-heading"><div><h2 id="attendance-title">오늘의 근태</h2><p>{settings.attendanceEnabled?`${settings.startTime} 이상 ${settings.endTime} 미만 자동 출근`:'자동 출근·퇴근 알림 꺼짐'}</p></div><button className="subtle-button" onClick={onSettings}>설정 <ChevronRight size={14}/></button></div>
+  <div className="section-heading"><div><h2 id="attendance-title">오늘의 근태</h2><p>{settings.attendanceEnabled?`${settings.startTime} 이상 ${settings.endTime} 미만 출근 확인`:'출근·퇴근 확인 알림 꺼짐'}</p></div><button className="subtle-button" onClick={onSettings}>설정 <ChevronRight size={14}/></button></div>
   <div className="attendance-times">{attendanceKeys.map(key=>{
    const {action,recorded,status}=attendanceReading(attendance,key);
    return <div className="attendance-time" key={key}><b>{action}</b><span>{recorded??'—'}</span><small>{status??(recorded?action+' 기록 완료':'기록 확인 전')}</small></div>;
@@ -174,7 +176,10 @@ const monitorStates:Record<string,{label:string;tone:string}>={
  unknown:{label:'확인 불가',tone:'neutral'},
 };
 export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Api;knowledge?:KnowledgeApi}){
- const [page,setPage]=useState<Page>('overview');const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [registry,setRegistry]=useState<Registry|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const [subscriptionError,setSubscriptionError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('');const [selected,setSelected]=useState<ProjectProgress|null>(null);const [form,setForm]=useState<'project'|'monitor'|null>(null);const [remove,setRemove]=useState<{entity:'project'|'monitor';item:Project|Monitor}|null>(null);const [editing,setEditing]=useState<Project|Monitor|null>(null);const [checkout,setCheckout]=useState<{date:string;returnFocus:HTMLElement|null}|null>(null);const [baseRevision,setBaseRevision]=useState<number|undefined>();const [monitorKind,setMonitorKind]=useState('checklist');const settingsDirty=useRef(false);const [settings,setSettings]=useState<Settings|null>(null);const declineRef=useRef<HTMLButtonElement>(null);
+ const [page,setPage]=useState<Page>('overview');const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [registry,setRegistry]=useState<Registry|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const [subscriptionError,setSubscriptionError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('');const [selected,setSelected]=useState<ProjectProgress|null>(null);const [form,setForm]=useState<'project'|'monitor'|null>(null);const [remove,setRemove]=useState<{entity:'project'|'monitor';item:Project|Monitor}|null>(null);const [editing,setEditing]=useState<Project|Monitor|null>(null);const [attendancePrompts,setAttendancePrompts]=useState<AttendancePrompt[]>([]);const [baseRevision,setBaseRevision]=useState<number|undefined>();const [monitorKind,setMonitorKind]=useState('checklist');const settingsDirty=useRef(false);const [settings,setSettings]=useState<Settings|null>(null);const declineRef=useRef<HTMLButtonElement>(null);
+ const answeringAttendance=useRef(false);
+ const attendancePrompt=attendancePrompts[0];
+ const promptAction=attendancePrompt?attendanceActions[attendancePrompt.action]:'';
  const [documentsOpen,setDocumentsOpen]=useState(false);
  const [projectAction,setProjectAction]=useState<ProjectAction|null>(null);
  const [chartRefresh,setChartRefresh]=useState(0);
@@ -219,16 +224,22 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  },[api]);
  useEffect(()=>{let active=true;void load();const timer=setInterval(()=>void load(),5000);const cleanup:(()=>void)[]=[];
   const register=(name:string,callback:(value:unknown)=>void)=>api.subscribe(name,callback).then(fn=>{if(active)cleanup.push(fn);else fn();});
-  void Promise.all([register('dashboard-updated',()=>{if(active)void load(true);}),register('open-settings',()=>setPage('settings')),register('checkout-prompt',value=>{
-   if(value&&typeof value==='object'&&'date' in value&&typeof value.date==='string'){
-    const date=value.date;
-    const returnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
-    setCheckout(prev=>({date,returnFocus:prev?prev.returnFocus:returnFocus}));
-   }
-  })]).then(async()=>{if(active)await api.ready?.();}).catch(e=>{if(active){active=false;cleanup.splice(0).forEach(fn=>fn());setSubscriptionError('이벤트 연결에 실패했습니다: '+errorMessage(e));}});
+  const openAttendancePrompt=(action:AttendanceAction)=>(value:unknown)=>{
+   if(!active||!value||typeof value!=='object'||!('date' in value)||typeof value.date!=='string')return;
+   const date=value.date;
+   const returnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
+   setAttendancePrompts(prev=>prev.some(prompt=>prompt.action===action&&prompt.date===date)
+    ?prev:[...prev,{action,date,returnFocus:prev.length?prev[0].returnFocus:returnFocus}]);
+  };
+  void Promise.all([
+   register('dashboard-updated',()=>{if(active)void load(true);}),
+   register('open-settings',()=>setPage('settings')),
+   register('checkin-prompt',openAttendancePrompt('checkIn')),
+   register('checkout-prompt',openAttendancePrompt('checkOut')),
+  ]).then(async()=>{if(active)await api.ready?.();}).catch(e=>{if(active){active=false;cleanup.splice(0).forEach(fn=>fn());setSubscriptionError('이벤트 연결에 실패했습니다: '+errorMessage(e));}});
   return()=>{active=false;loadGeneration.current++;dashboardLoad.current=null;clearInterval(timer);cleanup.splice(0).forEach(fn=>fn());};
  },[api,load]);
- useEffect(()=>{if(checkout)declineRef.current?.focus();},[checkout]);
+ useLayoutEffect(()=>{if(attendancePrompt)declineRef.current?.focus();},[attendancePrompt]);
  useLayoutEffect(()=>{
   if(!detailFocusRequest)return;
   const heading=detailTitle.current;
@@ -255,7 +266,25 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  const refreshChart=()=>setChartRefresh(n=>n+1);
  const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,chartRefresh);
  async function perform(action:()=>Promise<unknown>,message?:string){setBusy(true);setError('');try{await action();if(message)setNotice(message);await load(true);return true;}catch(e){setError(String(e).replace(/^Error: /,''));return false;}finally{setBusy(false);}}
- async function answer(answer:boolean){if(!checkout)return;const date=checkout.date;await perform(async()=>{const result=await api.answerCheckout(answer,date);setCheckout(null);if(result.attendanceError){setNotice('');setError('퇴근 실행 실패: '+result.attendanceError);return;}setNotice(result.expired?`${date} 퇴근 확인이 만료되어 실행되지 않았습니다.`:answer?'퇴근 실행 결과를 확인해 주세요.':`${date} 퇴근 알림을 거절했습니다.`);});}
+ async function answerAttendance(answer:boolean){
+  if(!attendancePrompt||answeringAttendance.current)return;
+  const {action,date}=attendancePrompt;
+  answeringAttendance.current=true;
+  await perform(async()=>{
+   try{
+    const result=await (action==='checkIn'?api.answerCheckin(answer,date):api.answerCheckout(answer,date));
+    setAttendancePrompts(prev=>prev.filter(prompt=>prompt!==attendancePrompt));
+    if(result.attendanceError){
+     setNotice('');
+     setError(`${promptAction} 실행 실패: ${result.attendanceError}`);
+     return;
+    }
+    if(result.expired)setNotice(`${date} ${promptAction} 확인이 만료되어 실행되지 않았습니다.`);
+    else if(result.answer??answer)setNotice(`${promptAction} 실행 결과를 확인해 주세요.`);
+    else setNotice(`${date} ${promptAction} 알림을 거절했습니다.`);
+   }finally{answeringAttendance.current=false;}
+  });
+ }
  const projects=useMemo(()=>snapshot?.projects.filter(p=>!p.archived&&p.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))??[],[snapshot,filter]);
  const activeProjects=snapshot?.projects.filter(p=>!p.archived)??[];const monitors=registry?.monitors.filter(m=>!m.archived)??[];
  const dailyProject=activeProjects.find(p=>p.id===dailyProjectId);
@@ -270,7 +299,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  async function save(e:FormEvent){e.preventDefault();if(!settings)return;const valid=/^([01]\d|2[0-3]):[0-5]\d$/;if(!valid.test(settings.startTime)||!valid.test(settings.endTime)||!valid.test(settings.checkoutTime)||settings.startTime>=settings.endTime){setError('올바른 시간과 출근 시간대의 시작·종료 순서를 확인해 주세요.');return;}await perform(async()=>{const result=await api.saveSettings(settings);settingsDirty.current=false;return result;},'설정을 저장했습니다.');}
  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Code2 size={23}/></div><span>DevDock</span></div><nav aria-label="주요 탐색">{pages.map(p=><button key={p.id} aria-current={page===p.id?'page':undefined} className={page===p.id?'selected':''} onClick={()=>{setPage(p.id);setSelected(null);setFilter('');}}><p.icon size={18}/><span>{p.label}</span>{p.id==='projects'&&<small>{activeProjects.length}</small>}</button>)}</nav><div className="sidebar-bottom"><div className="local-tag"><span className="local-dot"/>로컬 워크스페이스</div><div className="version">DevDock <span>v0.1.0</span></div></div></aside>
  <div className="main-shell"><header className="topbar"><div className="breadcrumb">워크스페이스 <ChevronRight size={13}/><strong>{title}</strong></div><div className="topbar-actions"><span className="sync"><i/>{snapshot?'화면 갱신 '+time(snapshot.now):'연결 확인 중'}</span><button className="icon-button" aria-label="지금 확인" disabled={busy} onClick={()=>void perform(async()=>{await api.refresh();setChartRefresh(n=>n+1);})}><RefreshCw size={16} className={busy?'spin':''}/></button><div className="profile">D</div></div></header>
- <main><div className="page-heading"><div><div className="eyebrow">{new Date(snapshot?.now??Date.now()).toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'})}</div><h1>{page==='overview'?'워크스페이스 개요':title}</h1><p>{page==='overview'?'프로젝트의 흐름과 지금 필요한 확인을 한곳에서 살펴보세요.':page==='projects'?'현재 작업과 검증 근거를 구분해 진행상황을 확인합니다.':page==='monitors'?'프로젝트에 필요한 관측 항목을 연결하고 관리합니다.':page==='activity'?'실제로 관측한 작업과 상태 변경을 시간순으로 확인합니다.':'자동화 시간과 로컬 연결을 관리합니다.'}</p></div>{(page==='overview'||page==='projects'||page==='monitors')&&<button className="primary-button" onClick={e=>{mutationTrigger.current=e.currentTarget;setBaseRevision(registry?.revision);setEditing(null);setMonitorKind('checklist');setForm(page==='monitors'?'monitor':'project');}}><Plus size={16}/>{page==='monitors'?'항목 추가':'프로젝트 연결'}</button>}</div>
+ <main><div className="page-heading"><div><div className="eyebrow">{new Date(snapshot?.now??Date.now()).toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'})}</div><h1>{page==='overview'?'워크스페이스 개요':title}</h1><p>{page==='overview'?'프로젝트의 흐름과 지금 필요한 확인을 한곳에서 살펴보세요.':page==='projects'?'현재 작업과 검증 근거를 구분해 진행상황을 확인합니다.':page==='monitors'?'프로젝트에 필요한 관측 항목을 연결하고 관리합니다.':page==='activity'?'실제로 관측한 작업과 상태 변경을 시간순으로 확인합니다.':'근태 확인 시간과 로컬 연결을 관리합니다.'}</p></div>{(page==='overview'||page==='projects'||page==='monitors')&&<button className="primary-button" onClick={e=>{mutationTrigger.current=e.currentTarget;setBaseRevision(registry?.revision);setEditing(null);setMonitorKind('checklist');setForm(page==='monitors'?'monitor':'project');}}><Plus size={16}/>{page==='monitors'?'항목 추가':'프로젝트 연결'}</button>}</div>
  {snapshot?.verificationMode&&<div className="alert notice" role="status">검증 모드입니다. 실제 근태와 자동 시작 설정을 변경하지 않습니다.</div>}
  {subscriptionError&&<div className="alert error" role="alert">{subscriptionError}</div>}
  {loadError&&<div className="alert error" role="alert"><ShieldCheck size={17}/><span>{loadError}</span><button className="icon-button" aria-label="조회 오류 닫기" onClick={()=>setLoadError('')}><X size={15}/></button></div>}
@@ -361,14 +390,23 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   })}</div>:<div className="empty-project"><MonitorDot size={28}/><h3>필요한 관측 항목을 추가하세요.</h3><p>체크리스트 또는 구조화 상태 파일을 연결할 수 있습니다.</p></div>}
  </section>}
  {page==='activity'&&snapshot&&<section className="panel"><div className="section-heading"><div><h2>작업 이벤트</h2><p>내부 사고 내용이나 원문 대화는 수집하지 않습니다.</p></div></div>{snapshot.events.length?<div className="event-list full">{snapshot.events.map(event=><div className="event" key={event.id}><div className="event-dot"/><div><strong>{event.message||event.type}</strong><span>{event.daemonId} · {time(event.at)} · {event.type}</span></div></div>)}</div>:<div className="empty-project"><Activity size={28}/><h3>관측한 활동이 없습니다.</h3><p>작업 중인지 확인할 수 없는 경우 정상이나 대기로 추정하지 않습니다.</p></div>}</section>}
- {page==='settings'&&settings&&<><form className="settings-layout" onChangeCapture={()=>{settingsDirty.current=true;}} onSubmit={save}><section className="panel settings-panel"><div className="section-heading"><div><h2>자동 출퇴근</h2><p>매일 적용하며 처리 여부가 불명확하면 자동 재실행하지 않습니다.</p></div><Clock3 size={18}/></div><label className="toggle-row"><span><strong>자동 출근·퇴근 알림</strong><small>{settings.startTime||'미설정'} 이상 {settings.endTime||'미설정'} 미만 출근, {settings.checkoutTime||'미설정'} 이후 하루 한 번 퇴근 확인</small></span><input type="checkbox" checked={settings.attendanceEnabled} onChange={e=>setSettings({...settings,attendanceEnabled:e.target.checked})}/></label><div className="time-inputs"><label>출근 시작<input type="time" value={settings.startTime} onChange={e=>setSettings({...settings,startTime:e.target.value})}/></label><label>출근 종료 미만<input type="time" value={settings.endTime} onChange={e=>setSettings({...settings,endTime:e.target.value})}/></label><label>퇴근 확인 시작<input type="time" value={settings.checkoutTime} onChange={e=>setSettings({...settings,checkoutTime:e.target.value})}/></label></div><label className="field">기존 스마트원 실행 스크립트<input placeholder="smartone-attendance.ps1 경로" value={settings.smartoneScript} onChange={e=>setSettings({...settings,smartoneScript:e.target.value})}/><small>기존 계정 설정을 사용하며 DevDock에 비밀번호를 복사하지 않습니다.</small></label><div className="settings-note"><ShieldCheck size={17}/><span>실행 결과가 불명확할 때는 스마트원 화면에서 기록을 확인하세요.</span></div></section><section className="panel settings-panel"><div className="section-heading"><div><h2>시작과 데이터</h2><p>이 컴퓨터의 사용자 설정으로 저장합니다.</p></div><Database size={18}/></div><label className="toggle-row"><span><strong>Windows 로그인 시 시작</strong><small>트레이에서 시작하고 백그라운드 점검을 유지합니다.</small></span><input type="checkbox" checked={settings.autostartEnabled} onChange={e=>setSettings({...settings,autostartEnabled:e.target.checked})}/></label><label className="field">원시 관측 보존 기간<select value={settings.retentionDays} onChange={e=>setSettings({...settings,retentionDays:Number(e.target.value)})}><option value={7}>7일</option><option value={14}>14일</option><option value={30}>30일</option></select></label><div className="settings-note">기본 다크 테마 · 5초 주기 점검 · 데이터는 로컬에 저장합니다.</div></section><div className="settings-footer">{error&&snapshot&&<button type="button" className="subtle-button" onClick={()=>{settingsDirty.current=false;setSettings(snapshot.settings);setError('');}}>최신 설정 불러오기</button>}<button className="primary-button" disabled={busy} type="submit"><Check size={16}/>설정 저장</button></div></form><section className="panel document-settings-panel"><div className="section-heading"><div><h2>문서와 작업기록</h2><p>핸드오버와 NAS 문서 연결을 관리합니다.</p></div><button type="button" className="subtle-button" aria-expanded={documentsOpen} onClick={()=>setDocumentsOpen(v=>!v)}>문서 연결 설정</button></div>{documentsOpen&&<DocumentSettings api={knowledge} projects={activeProjects} refreshVersion={snapshotVersion}/>}</section></>}
+ {page==='settings'&&settings&&<><form className="settings-layout" onChangeCapture={()=>{settingsDirty.current=true;}} onSubmit={save}><section className="panel settings-panel"><div className="section-heading"><div><h2>출퇴근 확인</h2><p>출근과 퇴근은 매일 한 번씩 확인하며, 실행을 선택하면 기록합니다.</p></div><Clock3 size={18}/></div><label className="toggle-row"><span><strong>출근·퇴근 확인 알림</strong><small>{settings.startTime||'미설정'} 이상 {settings.endTime||'미설정'} 미만 출근 확인, {settings.checkoutTime||'미설정'} 이후 하루 한 번 퇴근 확인</small></span><input type="checkbox" checked={settings.attendanceEnabled} onChange={e=>setSettings({...settings,attendanceEnabled:e.target.checked})}/></label><div className="time-inputs"><label>출근 확인 시작<input type="time" value={settings.startTime} onChange={e=>setSettings({...settings,startTime:e.target.value})}/></label><label>출근 확인 종료 미만<input type="time" value={settings.endTime} onChange={e=>setSettings({...settings,endTime:e.target.value})}/></label><label>퇴근 확인 시작<input type="time" value={settings.checkoutTime} onChange={e=>setSettings({...settings,checkoutTime:e.target.value})}/></label></div><label className="field">기존 스마트원 실행 스크립트<input placeholder="smartone-attendance.ps1 경로" value={settings.smartoneScript} onChange={e=>setSettings({...settings,smartoneScript:e.target.value})}/><small>기존 계정 설정을 사용하며 DevDock에 비밀번호를 복사하지 않습니다.</small></label><div className="settings-note"><ShieldCheck size={17}/><span>실행 결과가 불명확할 때는 스마트원 화면에서 기록을 확인하세요.</span></div></section><section className="panel settings-panel"><div className="section-heading"><div><h2>시작과 데이터</h2><p>이 컴퓨터의 사용자 설정으로 저장합니다.</p></div><Database size={18}/></div><label className="toggle-row"><span><strong>Windows 로그인 시 시작</strong><small>트레이에서 시작하고 백그라운드 점검을 유지합니다.</small></span><input type="checkbox" checked={settings.autostartEnabled} onChange={e=>setSettings({...settings,autostartEnabled:e.target.checked})}/></label><label className="field">원시 관측 보존 기간<select value={settings.retentionDays} onChange={e=>setSettings({...settings,retentionDays:Number(e.target.value)})}><option value={7}>7일</option><option value={14}>14일</option><option value={30}>30일</option></select></label><div className="settings-note">기본 다크 테마 · 5초 주기 점검 · 데이터는 로컬에 저장합니다.</div></section><div className="settings-footer">{error&&snapshot&&<button type="button" className="subtle-button" onClick={()=>{settingsDirty.current=false;setSettings(snapshot.settings);setError('');}}>최신 설정 불러오기</button>}<button className="primary-button" disabled={busy} type="submit"><Check size={16}/>설정 저장</button></div></form><section className="panel document-settings-panel"><div className="section-heading"><div><h2>문서와 작업기록</h2><p>핸드오버와 NAS 문서 연결을 관리합니다.</p></div><button type="button" className="subtle-button" aria-expanded={documentsOpen} onClick={()=>setDocumentsOpen(v=>!v)}>문서 연결 설정</button></div>{documentsOpen&&<DocumentSettings api={knowledge} projects={activeProjects} refreshVersion={snapshotVersion}/>}</section></>}
  <footer className="main-footer"><span><ShieldCheck size={13}/> 관측한 사실과 검증 근거를 기준으로 표시합니다.</span><span>로컬 저장 · {Intl.DateTimeFormat().resolvedOptions().timeZone||'시스템 로컬 시간'}</span></footer></main></div>
  {form&&<Modal title={editing?(form==='project'?'프로젝트 수정':'모니터 수정'):(form==='project'?'프로젝트 연결':'모니터링 항목 추가')} returnFocus={mutationTrigger.current} onClose={()=>setForm(null)}><form onSubmit={submitForm}>{error&&<p className="alert error">{error}</p>}<label className="field">이름<input name="name" defaultValue={editing?.name??''} required autoFocus placeholder={form==='project'?'프로젝트 이름':'모니터링 항목 이름'}/></label>{form==='project'?<><label className="field">프로젝트 폴더<input name="root" defaultValue={editing&&'root' in editing?editing.root:''} required placeholder="프로젝트의 전체 경로"/></label><label className="field">체크리스트 파일<input name="checklistPath" defaultValue={editing&&'checklistPath' in editing?editing.checklistPath:''} placeholder="선택 사항 · Markdown 파일 경로"/></label></>:<><label className="field">종류<select name="kind" value={monitorKind} onChange={e=>setMonitorKind(e.target.value)}><option value="checklist">체크리스트</option><option value="structuredStatus">구조화 상태</option><option value="daemon">데몬</option></select></label><label className="field">{monitorKind==='daemon'?<>데몬 대상<select name="source" defaultValue={editing&&'source' in editing?editing.source:'A'}><option value="A">A</option><option value="B">B</option></select></>:<>소스 경로<input name="source" defaultValue={editing&&'source' in editing?editing.source:''} required placeholder="파일 경로"/></>}</label><label className="field">프로젝트<select name="projectId" required={monitorKind!=='daemon'} defaultValue={editing&&'projectId' in editing?editing.projectId??'':''}><option value="">프로젝트 선택</option>{activeProjects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label></>}<div className="modal-actions"><button type="button" className="subtle-button" onClick={()=>setForm(null)}>취소</button><button className="primary-button" disabled={busy} type="submit">{editing?'저장':'연결'}</button></div></form></Modal>}
  {remove&&<Modal title={remove.entity==='project'?'프로젝트 제거':'모니터링 항목 제거'} returnFocus={mutationTrigger.current} onClose={()=>setRemove(null)}>{error&&<p className="alert error">{error}</p>}<p className="modal-copy">{remove.item.name} 항목을 목록에서 제거합니다. 원본 파일과 프로젝트는 보존합니다.</p><div className="modal-actions"><button className="subtle-button" autoFocus onClick={()=>setRemove(null)}>취소</button><button className="danger-button" disabled={busy} onClick={()=>void perform(()=>api.mutate({entity:remove.entity,action:'remove',id:remove.item.id},baseRevision),'항목을 제거했습니다.').then(ok=>{if(ok)setRemove(null);})}>{remove.entity==='project'?'목록에서 제거':'항목 제거'}</button></div></Modal>}
  {projectAction&&<ProjectActionDialog key={projectAction.project.id+projectAction.action} api={knowledge} value={projectAction}
   onClose={()=>setProjectAction(null)}
   onSettings={()=>{setProjectAction(null);setPage('settings');setDocumentsOpen(true);}}/>}
- {checkout&&<Modal title="스마트원 퇴근을 실행할까요." returnFocus={checkout.returnFocus} onClose={()=>void answer(false)}>{error&&<p className="alert error">{error}</p>}<div className="prompt-icon"><Clock3 size={25}/></div><p className="modal-copy">{checkout.date} 퇴근을 기록할 수 있습니다. 실행을 선택하면 실제 스마트원 퇴근이 처리됩니다.</p><p className="small">현재 기록은 {snapshot?.attendance.message||'서버 상태 확인 필요'}입니다.</p><div className="modal-actions"><button ref={declineRef} className="subtle-button" onClick={()=>void answer(false)}>오늘은 안 함</button><button className="primary-button" disabled={busy} onClick={()=>void answer(true)}>실행</button></div></Modal>}
+ {attendancePrompt&&<Modal key={`${attendancePrompt.action}:${attendancePrompt.date}`} title={`스마트원 ${promptAction}을 실행할까요.`} returnFocus={attendancePrompt.returnFocus} onClose={()=>void answerAttendance(false)}>
+  {error&&<p className="alert error">{error}</p>}
+  <div className="prompt-icon"><Clock3 size={25}/></div>
+  <p className="modal-copy">{attendancePrompt.date} {promptAction}을 기록할 수 있습니다. 실행을 선택하면 실제 스마트원 {promptAction}이 처리됩니다.</p>
+  <p className="small">현재 기록은 {snapshot?.attendance.message||'서버 상태 확인 필요'}입니다.</p>
+  <div className="modal-actions">
+   <button ref={declineRef} className="subtle-button" onClick={()=>void answerAttendance(false)}>오늘은 안 함</button>
+   <button className="primary-button" disabled={busy} onClick={()=>void answerAttendance(true)}>실행</button>
+  </div>
+ </Modal>}
 
  </div>;
 }

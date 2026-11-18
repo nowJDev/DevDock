@@ -58,6 +58,17 @@ pub fn claim_ready_prompt(
     }
     engine.claim_prompt(date)
 }
+pub fn claim_ready_checkin_prompt(
+    engine: &crate::service::Engine,
+    safe: bool,
+    ready: bool,
+    schedule: &serde_json::Value,
+) -> Result<bool, String> {
+    if safe || !ready || schedule["checkIn"] != true {
+        return Ok(false);
+    }
+    engine.claim_checkin_prompt(schedule["date"].as_str().ok_or("invalid schedule date")?)
+}
 pub fn maintenance_worker(mut run: impl FnMut(), mut wait: impl FnMut() -> bool) {
     loop {
         run();
@@ -156,21 +167,46 @@ pub fn checkout_response(
 ) -> Result<serde_json::Value, String> {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| "invalid prompt date")?;
     chrono::NaiveDate::parse_from_str(now, "%Y-%m-%d").map_err(|_| "invalid current date")?;
-    let mut result = resolve(date, answer, now)?;
+    let result = resolve(date, answer, now)?;
     if result["date"] != date || !result["expired"].is_boolean() || !result["answer"].is_boolean() {
         return Err("invalid prompt response".into());
     }
-    if date == now && answer && result["answer"] == true && result["expired"] == false {
+    Ok(run_confirmed_attendance(
+        result,
+        date == now && answer,
+        action,
+    ))
+}
+pub fn checkin_response(
+    engine: &crate::service::Engine,
+    safe: bool,
+    date: &str,
+    answer: bool,
+    now: &str,
+    action: &mut impl FnMut() -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    if safe {
+        return Err("검증 모드에서는 출근 처리를 실행하지 않습니다.".into());
+    }
+    let result = engine.resolve_checkin_prompt_at(date, answer, now)?;
+    Ok(run_confirmed_attendance(result, answer, action))
+}
+fn run_confirmed_attendance(
+    mut result: serde_json::Value,
+    allowed: bool,
+    action: &mut impl FnMut() -> Result<serde_json::Value, String>,
+) -> serde_json::Value {
+    if allowed && result["answer"] == true && result["expired"] == false {
         if let Err(error) = action() {
             result["attendanceError"] = serde_json::Value::String(error);
         }
     }
-    Ok(result)
+    result
 }
 #[cfg(feature = "desktop")]
 pub mod desktop {
     use crate::{daemon, service::Engine, smartone};
-    use chrono::Local;
+    use chrono::{DateTime, Local};
     use serde_json::{json, Value};
     use std::{
         path::PathBuf,
@@ -193,6 +229,22 @@ pub mod desktop {
     impl Runtime {
         pub fn attendance(&self, action: &str) -> Result<Value, String> {
             self.attendance_for_date(action, None)
+        }
+        fn check_prompt_window(
+            &self,
+            action: &str,
+            date: &str,
+            now: &DateTime<Local>,
+        ) -> Result<(), String> {
+            if action == "checkIn" {
+                let schedule = self.engine.evaluate_schedule(&now.to_rfc3339())?;
+                if schedule["date"] != date || schedule["checkIn"] != true {
+                    return Err("출근 알림이 만료되었습니다.".into());
+                }
+            } else if date != now.date_naive().to_string() {
+                return Err("퇴근 알림 날짜가 만료되었습니다.".into());
+            }
+            Ok(())
         }
         fn attendance_for_date(
             &self,
@@ -218,21 +270,27 @@ pub mod desktop {
                 return Err("근태 처리 중입니다.".into());
             }
             let result = (|| {
-                let date = Local::now().date_naive().to_string();
-                if expected_date.is_some_and(|expected| expected != date) {
-                    return Err("퇴근 알림 날짜가 만료되었습니다.".into());
+                let now = Local::now();
+                let date = now.date_naive().to_string();
+                if let Some(expected) = expected_date {
+                    self.check_prompt_window(action, expected, &now)?;
                 }
                 let id = self
                     .engine
                     .claim_run(&date, action)?
                     .ok_or("오늘 이미 처리했거나 확인이 필요합니다.")?;
-                if expected_date
-                    .is_some_and(|expected| expected != Local::now().date_naive().to_string())
-                {
-                    return self.engine.finish_run(
-                        &id,
-                        json!({"state":"refused","message":"퇴근 알림 날짜가 만료되었습니다."}),
-                    );
+                if let Some(expected) = expected_date {
+                    if let Err(message) = self.check_prompt_window(action, expected, &Local::now())
+                    {
+                        let refused = self
+                            .engine
+                            .finish_run(&id, json!({"state":"refused","message":message}))?;
+                        return if action == "checkIn" {
+                            Err(message)
+                        } else {
+                            Ok(refused)
+                        };
+                    }
                 }
                 let result = smartone::execute(
                     PathBuf::from(script).as_path(),
@@ -336,6 +394,28 @@ pub mod desktop {
     ) -> Result<Value, String> {
         let r = s.inner().clone();
         let v = blocking(move || r.attendance(&action)).await?;
+        changed(&app);
+        Ok(v)
+    }
+    #[tauri::command]
+    pub async fn answer_checkin(
+        app: AppHandle,
+        s: State<'_, Runtime>,
+        answer: bool,
+        prompt_date: String,
+    ) -> Result<Value, String> {
+        let r = s.inner().clone();
+        let v = blocking(move || {
+            super::checkin_response(
+                &r.engine,
+                r.safe,
+                &prompt_date,
+                answer,
+                &Local::now().to_rfc3339(),
+                &mut || r.attendance_for_date("checkIn", Some(&prompt_date)),
+            )
+        })
+        .await?;
         changed(&app);
         Ok(v)
     }
@@ -550,11 +630,19 @@ pub mod desktop {
             if !r.safe {
                 if let Ok(s) = r.engine.evaluate_schedule(&Local::now().to_rfc3339()) {
                     let date = s["date"].as_str().unwrap_or("");
-                    if s["checkIn"] == true {
-                        let worker = r.clone();
-                        std::thread::spawn(move || {
-                            let _ = worker.attendance("checkIn");
-                        });
+                    if let Some(w) = app.get_webview_window("main").filter(|_| {
+                        super::claim_ready_checkin_prompt(
+                            &r.engine,
+                            r.safe,
+                            r.ui_ready.load(Ordering::Acquire),
+                            &s,
+                        )
+                        .unwrap_or(false)
+                    }) {
+                        let _ = w.unminimize();
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                        let _ = app.emit("checkin-prompt", json!({"date":date}));
                     }
                     if s["checkoutPrompt"] == true
                         && r.engine

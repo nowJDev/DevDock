@@ -20,7 +20,7 @@ function fixture() {
  const snapshot:Snapshot={now:'2026-11-17T08:15:00+09:00',registryRevision:1,daemons:[{id:'A',name:'A daemon',transportState:'unknown',activityState:'unknown',latencyMs:null,checkedAt:null,lastActivityAt:null,reason:'접근 권한을 확인해 주세요.',plan:[]}],projects:[{id:'p1',name:'DevDock',root:'D:/work/DevDock',total:5,verified:2,reportedComplete:1,inProgress:1,blocked:1,updatedAt:null,currentTask:'트레이 동작 구현',tasks:[]}],attendance:{date:'2026-11-17',state:'unknown',checkInTime:null,checkOutTime:null,lastCode:null,message:'서버 상태를 확인하지 않았습니다.',policy:settings,runs:[]},events:[],settings};
  let registry:Registry={schemaVersion:1,revision:1,projects:[{id:'p1',name:'DevDock',root:'D:/work/DevDock'}],monitors:[{id:'m1',name:'빌드 결과',kind:'structuredStatus',source:'status.json',projectId:'p1',enabled:true}],tasks:[],evidence:[]};
  const listeners=new Map<string,(value:unknown)=>void>();
- const api:Api={snapshot:vi.fn(async()=>snapshot),registry:vi.fn(async()=>registry),history:vi.fn(async()=>({monitorId:'A',points:[],progress:[]})),mutate:vi.fn(async(operation:any,revision)=>{if(revision!==registry.revision)throw new Error('revision conflict');if(operation.action==='remove'){if(operation.entity==='monitor')registry={...registry,revision:registry.revision+1,monitors:registry.monitors.map(m=>m.id===operation.id?{...m,archived:true}:m)};else {registry={...registry,revision:registry.revision+1,projects:registry.projects.map(p=>p.id===operation.id?{...p,archived:true}:p)};snapshot.projects=snapshot.projects.map(p=>p.id===operation.id?{...p,archived:true}:p);}}else if(operation.action==='upsert'){if(operation.entity==='monitor')registry={...registry,revision:registry.revision+1,monitors:registry.monitors.map(m=>m.id===operation.value.id?operation.value:m)};else {registry={...registry,revision:registry.revision+1,projects:registry.projects.map(p=>p.id===operation.value.id?operation.value:p)};snapshot.projects=snapshot.projects.map(p=>p.id===operation.value.id?{...p,...operation.value}:p);}}return registry;}),saveSettings:vi.fn(async()=>({ok:true})),attendance:vi.fn(async()=>({ok:true})),answerCheckout:vi.fn(async()=>({expired:false})),setAutostart:vi.fn(async()=>({ok:true})),refresh:vi.fn(async()=>({ok:true})),subscribe:vi.fn(async(name,callback)=>{listeners.set(name,callback);return()=>listeners.delete(name);})};
+ const api:Api={snapshot:vi.fn(async()=>snapshot),registry:vi.fn(async()=>registry),history:vi.fn(async()=>({monitorId:'A',points:[],progress:[]})),mutate:vi.fn(async(operation:any,revision)=>{if(revision!==registry.revision)throw new Error('revision conflict');if(operation.action==='remove'){if(operation.entity==='monitor')registry={...registry,revision:registry.revision+1,monitors:registry.monitors.map(m=>m.id===operation.id?{...m,archived:true}:m)};else {registry={...registry,revision:registry.revision+1,projects:registry.projects.map(p=>p.id===operation.id?{...p,archived:true}:p)};snapshot.projects=snapshot.projects.map(p=>p.id===operation.id?{...p,archived:true}:p);}}else if(operation.action==='upsert'){if(operation.entity==='monitor')registry={...registry,revision:registry.revision+1,monitors:registry.monitors.map(m=>m.id===operation.value.id?operation.value:m)};else {registry={...registry,revision:registry.revision+1,projects:registry.projects.map(p=>p.id===operation.value.id?operation.value:p)};snapshot.projects=snapshot.projects.map(p=>p.id===operation.value.id?{...p,...operation.value}:p);}}return registry;}),saveSettings:vi.fn(async()=>({ok:true})),attendance:vi.fn(async()=>({ok:true})),answerCheckin:vi.fn(async()=>({expired:false})),answerCheckout:vi.fn(async()=>({expired:false})),setAutostart:vi.fn(async()=>({ok:true})),refresh:vi.fn(async()=>({ok:true})),subscribe:vi.fn(async(name,callback)=>{listeners.set(name,callback);return()=>listeners.delete(name);})};
  return {snapshot,api,listeners,changeRegistry:()=>{registry={...registry,revision:registry.revision+1};}};
 }
 describe('DevDock dashboard',()=>{
@@ -94,6 +94,82 @@ describe('DevDock dashboard',()=>{
   await user.keyboard('{Enter}');
   await waitFor(()=>expect(api.answerCheckout).toHaveBeenCalledWith(false,'2026-11-17'));
   expect(api.attendance).not.toHaveBeenCalled();
+ });
+ it('executes check-in only after confirming the event date',async()=>{
+  const {api,listeners}=fixture();const user=userEvent.setup();render(<App api={api}/>);
+  await screen.findByText('트레이 동작 구현');
+  await act(async()=>listeners.get('checkin-prompt')?.({date:'2026-11-17'}));
+  const dialog=await screen.findByRole('dialog',{name:/스마트원 출근/});
+  expect(api.answerCheckin).not.toHaveBeenCalled();
+  expect(api.attendance).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole('button',{name:'실행'}));
+  await waitFor(()=>expect(api.answerCheckin).toHaveBeenCalledWith(true,'2026-11-17'));
+  expect(api.attendance).not.toHaveBeenCalled();
+  expect(api.answerCheckout).not.toHaveBeenCalled();
+ });
+ it('defaults the check-in prompt to declining on Enter',async()=>{
+  const {api,listeners}=fixture();const user=userEvent.setup();render(<App api={api}/>);
+  await screen.findByText('트레이 동작 구현');
+  await act(async()=>listeners.get('checkin-prompt')?.({date:'2026-11-17'}));
+  const dialog=await screen.findByRole('dialog',{name:/스마트원 출근/});
+  const decline=within(dialog).getByRole('button',{name:'오늘은 안 함'});
+  expect(decline).toHaveFocus();
+  await user.keyboard('{Enter}');
+  await waitFor(()=>expect(api.answerCheckin).toHaveBeenCalledWith(false,'2026-11-17'));
+  expect(api.attendance).not.toHaveBeenCalled();
+ });
+ it('shows an expired check-in answer without success',async()=>{
+  const {api,listeners}=fixture();const user=userEvent.setup();
+  api.answerCheckin=vi.fn(async()=>({expired:true,date:'2026-11-17',answer:false}));
+  render(<App api={api}/>);
+  await screen.findByText('트레이 동작 구현');
+  await act(async()=>listeners.get('checkin-prompt')?.({date:'2026-11-17'}));
+  const dialog=await screen.findByRole('dialog',{name:/스마트원 출근/});
+  await user.click(within(dialog).getByRole('button',{name:'실행'}));
+  expect(await screen.findByText(/2026-11-17 출근 확인이 만료/)).toBeInTheDocument();
+  expect(screen.queryByText('출근 실행 결과를 확인해 주세요.')).not.toBeInTheDocument();
+ });
+ it('queues distinct check-in and checkout prompts and dismisses them in order',async()=>{
+  const {api,listeners}=fixture();const user=userEvent.setup();render(<App api={api}/>);
+  await screen.findByText('트레이 동작 구현');
+  await act(async()=>{
+   listeners.get('checkin-prompt')?.({date:'2026-11-17'});
+   listeners.get('checkout-prompt')?.({date:'2026-11-17'});
+   listeners.get('checkin-prompt')?.({date:'2026-11-17'});
+   listeners.get('checkin-prompt')?.({date:'2026-11-18'});
+  });
+  expect(await screen.findByRole('dialog',{name:/스마트원 출근/})).toHaveTextContent('2026-11-17');
+  await user.keyboard('{Escape}');
+  await waitFor(()=>expect(api.answerCheckin).toHaveBeenCalledWith(false,'2026-11-17'));
+  const checkout=await screen.findByRole('dialog',{name:/스마트원 퇴근/});
+  expect(within(checkout).getByRole('button',{name:'오늘은 안 함'})).toHaveFocus();
+  await user.keyboard('{Enter}');
+  await waitFor(()=>expect(api.answerCheckout).toHaveBeenCalledWith(false,'2026-11-17'));
+  const nextCheckin=await screen.findByRole('dialog',{name:/스마트원 출근/});
+  expect(nextCheckin).toHaveTextContent('2026-11-18');
+  await user.click(within(nextCheckin).getByRole('button',{name:'닫기'}));
+  await waitFor(()=>expect(api.answerCheckin).toHaveBeenLastCalledWith(false,'2026-11-18'));
+  expect(api.answerCheckin).toHaveBeenCalledTimes(2);
+  expect(api.attendance).not.toHaveBeenCalled();
+ });
+ it('waits for the check-in listener and the other three listeners before signaling readiness',async()=>{
+  const {api,listeners}=fixture();
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const subscribe=api.subscribe;
+  api.subscribe=async(name,callback)=>{
+   if(name==='checkin-prompt')await gate;
+   return subscribe(name,callback);
+  };
+  api.ready=vi.fn(async()=>{
+   expect([...listeners.keys()].sort()).toEqual(['checkin-prompt','checkout-prompt','dashboard-updated','open-settings']);
+   listeners.get('checkin-prompt')?.({date:'2026-11-17'});
+  });
+  render(<App api={api}/>);
+  await screen.findByText('트레이 동작 구현');
+  expect(api.ready).not.toHaveBeenCalled();
+  release();
+  expect(await screen.findByRole('dialog',{name:/스마트원 출근/})).toBeInTheDocument();
  });
  it('opens restored history on the overview for a legacy project with a document basis',async()=>{
   const {api,snapshot,listeners}=fixture();
@@ -313,14 +389,14 @@ describe('DevDock dashboard',()=>{
   expect(screen.getByText('상태 파일을 읽지 못했습니다.')).toBeInTheDocument();
  });
 
- it('describes the actual automatic attendance times and updates the help during editing',async()=>{
+ it('describes the attendance prompt times and updates the help during editing',async()=>{
   const {api,snapshot}=fixture();
   snapshot.settings.startTime='08:15';
   const user=userEvent.setup();render(<App api={api}/>);
-  expect(await screen.findByText(/08:15.*자동 출근/)).toBeInTheDocument();
+  expect(await screen.findByText(/08:15.*출근 확인/)).toBeInTheDocument();
   await user.click(screen.getAllByRole('button',{name:'설정'})[0]);
   expect(screen.getByText(/08:15 이상 08:30 미만/)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText('출근 시작'),{target:{value:'08:20'}});
+  fireEvent.change(screen.getByLabelText('출근 확인 시작'),{target:{value:'08:20'}});
   expect(screen.getByText(/08:20 이상 08:30 미만/)).toBeInTheDocument();
   expect(api.saveSettings).not.toHaveBeenCalled();
  });
@@ -393,7 +469,7 @@ describe('DevDock dashboard',()=>{
    vi.useRealTimers();
   }
  });
- it('saves settings once with the original revision and preserves conflicting edits',async()=>{const {api,snapshot,listeners}=fixture();Object.assign(snapshot.settings,{revision:1});api.saveSettings=vi.fn(async s=>{if(s.revision!==snapshot.settings.revision)throw new Error('revision conflict');return {...s,revision:s.revision+1};});const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getAllByRole('button',{name:'설정'})[0]);await user.selectOptions(screen.getByLabelText('원시 관측 보존 기간'),'14');snapshot.settings={...snapshot.settings,revision:2,attendanceEnabled:false};listeners.get('dashboard-updated')!(null);await waitFor(()=>expect(api.snapshot).toHaveBeenCalledTimes(2));await user.click(screen.getByRole('button',{name:'설정 저장'}));expect(await screen.findByRole('alert')).toHaveTextContent(/충돌|conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');expect(api.setAutostart).not.toHaveBeenCalled();await act(async()=>{listeners.get('dashboard-updated')!(null);});expect(screen.getByRole('alert')).toHaveTextContent(/conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');await user.click(screen.getByRole('button',{name:'최신 설정 불러오기'}));expect(screen.queryByRole('alert')).not.toBeInTheDocument();expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('7');expect(screen.getByLabelText(/자동 출근·퇴근 알림/)).not.toBeChecked();await user.click(screen.getByRole('button',{name:'설정 저장'}));await waitFor(()=>expect(api.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({revision:2,attendanceEnabled:false})));});
+ it('saves settings once with the original revision and preserves conflicting edits',async()=>{const {api,snapshot,listeners}=fixture();Object.assign(snapshot.settings,{revision:1});api.saveSettings=vi.fn(async s=>{if(s.revision!==snapshot.settings.revision)throw new Error('revision conflict');return {...s,revision:s.revision+1};});const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getAllByRole('button',{name:'설정'})[0]);await user.selectOptions(screen.getByLabelText('원시 관측 보존 기간'),'14');snapshot.settings={...snapshot.settings,revision:2,attendanceEnabled:false};listeners.get('dashboard-updated')!(null);await waitFor(()=>expect(api.snapshot).toHaveBeenCalledTimes(2));await user.click(screen.getByRole('button',{name:'설정 저장'}));expect(await screen.findByRole('alert')).toHaveTextContent(/충돌|conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');expect(api.setAutostart).not.toHaveBeenCalled();await act(async()=>{listeners.get('dashboard-updated')!(null);});expect(screen.getByRole('alert')).toHaveTextContent(/conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');await user.click(screen.getByRole('button',{name:'최신 설정 불러오기'}));expect(screen.queryByRole('alert')).not.toBeInTheDocument();expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('7');expect(screen.getByLabelText(/출근·퇴근 확인 알림/)).not.toBeChecked();await user.click(screen.getByRole('button',{name:'설정 저장'}));await waitFor(()=>expect(api.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({revision:2,attendanceEnabled:false})));});
 
  it('informs the user when a dated checkout prompt expires',async()=>{const {api,listeners}=fixture();api.answerCheckout=vi.fn(async()=>({expired:true,date:'2026-11-17',answer:false}));const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');listeners.get('checkout-prompt')!({date:'2026-11-17'});await user.click(await screen.findByRole('button',{name:'실행'}));expect(await screen.findByText(/만료되어 실행되지 않았습니다/)).toBeInTheDocument();});
  it('submits settings only once and keeps the revision',async()=>{const {api}=fixture();const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getAllByRole('button',{name:'설정'})[0]);await user.click(screen.getByLabelText(/Windows 로그인 시 시작/));await user.click(screen.getByRole('button',{name:'설정 저장'}));await waitFor(()=>expect(api.saveSettings).toHaveBeenCalledTimes(1));expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({revision:1,autostartEnabled:true}));expect(api.setAutostart).not.toHaveBeenCalled();});
