@@ -12,6 +12,7 @@ import KnowledgeHistory from './knowledge/KnowledgeHistory';
 import './styles/project-actions.css';
 import Modal from './components/Dialog';
 import {knowledgeApi as defaultKnowledge,type KnowledgeApi} from './knowledge/api';
+import type {ProjectProgressView} from './knowledge/contracts';
 type Page='overview'|'projects'|'monitors'|'activity'|'settings';
 const pages:{id:Page;label:string;icon:typeof Activity}[]=[{id:'overview',label:'개요',icon:LayoutDashboard},{id:'projects',label:'프로젝트',icon:FolderKanban},{id:'monitors',label:'모니터링',icon:MonitorDot},{id:'activity',label:'활동 이력',icon:Activity},{id:'settings',label:'설정',icon:Settings2}];
 const transport:Record<string,string>={healthy:'응답 정상',slow:'응답 지연',disconnected:'연결 실패',unknown:'확인 불가'};
@@ -56,6 +57,20 @@ function useProjectHistory(api:Api,projectId:string|undefined,hours:number,refre
  useEffect(()=>{refresh.current?.();},[api,projectId,hours,attempt,refreshVersion]);
  const matchingResult=result?.projectId===projectId&&result?.hours===hours?result:null;
  return {result:matchingResult,retry:()=>{setResult(null);retry(n=>n+1);}};
+}
+type OverviewProgress={projectId:string}&({view:ProjectProgressView;error?:never}|{view?:never;error:string});
+function useOverviewProgress(api:KnowledgeApi,projectId:string|undefined,refreshVersion:number){
+ const [result,setResult]=useState<OverviewProgress|null>(null);
+ useEffect(()=>{
+  if(!projectId){setResult(null);return;}
+  let current=true;
+  void api.progress(projectId).then(
+   view=>{if(current)setResult({projectId,view});},
+   err=>{if(current)setResult(previous=>previous?.projectId===projectId&&previous.view?previous:{projectId,error:errorMessage(err)});},
+  );
+  return()=>{current=false;};
+ },[api,projectId,refreshVersion]);
+ return result?.projectId===projectId?result:null;
 }
 function HistoryError({message,onRetry}:{message:string;onRetry:()=>void}){
  return <div className="history-error"><p role="alert">진행 이력을 불러오지 못했습니다. {message}</p><button className="subtle-button" onClick={onRetry}>다시 조회</button></div>;
@@ -163,7 +178,6 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  const [documentsOpen,setDocumentsOpen]=useState(false);
  const [projectAction,setProjectAction]=useState<ProjectAction|null>(null);
  const [chartRefresh,setChartRefresh]=useState(0);
- const [historyMode,setHistoryMode]=useState<'auto'|'legacy'|'knowledge'>('auto');
  const [days,setDays]=useState<7|30>(7);
  const [dailyProjectId,setDailyProjectId]=useState<string>();
  const [snapshotVersion,setSnapshotVersion]=useState(0);
@@ -230,8 +244,15 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   setSelected(null);
   (selectedRow.current??projectSearch.current)?.focus();
  }
- const advancedChart=historyMode==='knowledge'||historyMode==='auto'&&snapshot?.projects.find(p=>p.id===dailyProjectId)?.progressMode==='managed';
- const dailyHistory=useProjectHistory(api,page==='overview'&&!advancedChart?dailyProjectId:undefined,days*24,chartRefresh);
+ const overviewProjectId=page==='overview'?dailyProjectId:undefined;
+ const overviewProgress=useOverviewProgress(knowledge,overviewProjectId,chartRefresh);
+ const managedChart=snapshot?.projects.find(p=>p.id===overviewProjectId)?.progressMode==='managed';
+ const progressView=overviewProgress?.view;
+ const hasDocumentBasis=progressView?.bases.some(basis=>basis.kind!=='legacy');
+ const documentChart=progressView&&(managedChart||hasDocumentBasis)?progressView:null;
+ const showObservedChart=Boolean(overviewProgress&&!managedChart&&!documentChart);
+ const dailyHistory=useProjectHistory(api,showObservedChart?overviewProjectId:undefined,days*24,chartRefresh);
+ const refreshChart=()=>setChartRefresh(n=>n+1);
  const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,chartRefresh);
  async function perform(action:()=>Promise<unknown>,message?:string){setBusy(true);setError('');try{await action();if(message)setNotice(message);await load(true);return true;}catch(e){setError(String(e).replace(/^Error: /,''));return false;}finally{setBusy(false);}}
  async function answer(answer:boolean){if(!checkout)return;const date=checkout.date;await perform(async()=>{const result=await api.answerCheckout(answer,date);setCheckout(null);if(result.attendanceError){setNotice('');setError('퇴근 실행 실패: '+result.attendanceError);return;}setNotice(result.expired?`${date} 퇴근 확인이 만료되어 실행되지 않았습니다.`:answer?'퇴근 실행 결과를 확인해 주세요.':`${date} 퇴근 알림을 거절했습니다.`);});}
@@ -271,15 +292,16 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      <select aria-label="진행현황 프로젝트" value={dailyProjectId} onChange={e=>setDailyProjectId(e.target.value)}>
       {activeProjects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
      </select>
-     {!advancedChart&&<><select aria-label="진행현황 기간" value={days} onChange={e=>setDays(e.target.value==='30'?30:7)}><option value={7}>최근 7일</option><option value={30}>최근 30일</option></select>
-     <button type="button" className="subtle-button" aria-label="일별 차트 새로고침" onClick={()=>setChartRefresh(n=>n+1)}><RefreshCw size={14}/>새로고침</button></>}
-     <button type="button" className="subtle-button" onClick={()=>setHistoryMode(advancedChart?'legacy':'knowledge')}>{advancedChart?'이전 집계 차트':'기준·과거 이력'}</button>
+     {showObservedChart&&<><select aria-label="진행현황 기간" value={days} onChange={e=>setDays(e.target.value==='30'?30:7)}><option value={7}>최근 7일</option><option value={30}>최근 30일</option></select>
+     <button type="button" className="subtle-button" aria-label="일별 차트 새로고침" onClick={refreshChart}><RefreshCw size={14}/>새로고침</button></>}
     </div>}
    </div>
    {dailyProject?<div className="daily-panel-content">
     <h3 className="daily-selected">{dailyProject.name}</h3>
     <ProjectSource project={dailyProject} current/>
-    {advancedChart?<KnowledgeHistory key={dailyProject.id} api={knowledge} project={dailyProject} refreshVersion={chartRefresh}/>:dailyHistory.result?.state==='error'?<HistoryError message={dailyHistory.result.message} onRetry={dailyHistory.retry}/>
+    {documentChart?<KnowledgeHistory key={dailyProject.id} api={knowledge} project={dailyProject} progress={documentChart} refreshVersion={chartRefresh} onRefresh={refreshChart}/>
+     :managedChart&&overviewProgress?.error?<HistoryError message={overviewProgress.error} onRetry={refreshChart}/>
+     :dailyHistory.result?.state==='error'?<HistoryError message={dailyHistory.result.message} onRetry={dailyHistory.retry}/>
      :dailyHistory.result?.state==='ready'?<DailyProgressChart key={dailyProject.id} points={dailyPoints} days={days} today={chartToday} projectName={dailyProject.name}/>
      :<p className="history-pending" role="status">일별 진행 기록을 불러오는 중입니다.</p>}
    </div>:<div className="empty-project"><FolderKanban size={24}/><h3>연결된 프로젝트가 없습니다.</h3><p>프로젝트를 연결하면 일별 진행 기록을 볼 수 있습니다.</p></div>}

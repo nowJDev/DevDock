@@ -10,28 +10,29 @@ const kstToday=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul'}).form
 function rangeFor(days:number,end:string){const d=new Date(end+'T00:00:00Z');d.setUTCDate(d.getUTCDate()-days+1);return {from:d.toISOString().slice(0,10),through:end};}
 const originName=(value:string)=>value==='observed'?'실제 수집':value==='correction'?'명시적 보정':'문서 복원';
 interface Read {key:string;history:ProjectHistory|null;error:string;loading:boolean}
-export default function KnowledgeHistory({api,project,refreshVersion,today}:{api:KnowledgeApi;project:ProjectProgress;refreshVersion:number;today?:string}){
- const [meta,setMeta]=useState<ProjectProgressView|null>(null),[basis,setBasis]=useState('legacy'),[version,setVersion]=useState(0),[period,setPeriod]=useState('7'),[range,setRange]=useState(()=>rangeFor(7,today??kstToday())),[draftRange,setDraftRange]=useState(()=>rangeFor(7,today??kstToday())),[manual,setManual]=useState(0),[result,setResult]=useState<Read|null>(null),[error,setError]=useState(''),[day,setDay]=useState<{date:string;point?:HistoryPoint;opener:HTMLElement|null}|null>(null),[sourceText,setSourceText]=useState(''),[sourceError,setSourceError]=useState('');
- const initialized=useRef(false),refresh=useRef<(()=>void)|null>(null);
- useEffect(()=>{let active=true;void api.progress(project.id).then(v=>{if(!active)return;setMeta(v);if(!initialized.current){initialized.current=true;if(project.progressMode==='managed'&&v.basis){setBasis(v.basis.basisId);setVersion(v.basis.version);}}},e=>{if(active)setError(String(e));});return()=>{active=false;};},[api,project.id,refreshVersion,manual]);
- const key=JSON.stringify([project.id,basis,range.from,range.through]);const ready=meta!==null;
+export default function KnowledgeHistory({api,project,progress,refreshVersion,onRefresh,today}:{api:KnowledgeApi;project:ProjectProgress;progress:ProjectProgressView;refreshVersion:number;onRefresh:()=>void;today?:string}){
+ const initialBasis=progress.basis?.kind==='legacy'?progress.bases.find(b=>b.kind!=='legacy')??progress.basis:progress.basis;
+ const initialDays=progress.mode==='legacy'&&initialBasis&&initialBasis.kind!=='legacy'?30:7;
+ const [basis,setBasis]=useState(initialBasis?.basisId??'legacy'),[version,setVersion]=useState(initialBasis?.version??0),[period,setPeriod]=useState(String(initialDays)),[range,setRange]=useState(()=>rangeFor(initialDays,today??kstToday())),[draftRange,setDraftRange]=useState(()=>rangeFor(initialDays,today??kstToday())),[manual,setManual]=useState(0),[result,setResult]=useState<Read|null>(null),[error,setError]=useState(''),[day,setDay]=useState<{date:string;point?:HistoryPoint;opener:HTMLElement|null}|null>(null),[sourceText,setSourceText]=useState(''),[sourceError,setSourceError]=useState('');
+ const refresh=useRef<(()=>void)|null>(null);
+ const key=JSON.stringify([project.id,basis,range.from,range.through]);
  useEffect(()=>{
-  if(!ready){refresh.current=null;return;}let active=true,inFlight=false,pending=false;
+  let active=true,inFlight=false,pending=false;
   const read=()=>{if(inFlight){pending=true;return;}inFlight=true;setResult(old=>old?.key===key?{...old,loading:true,error:''}:{key,history:null,error:'',loading:true});void api.history(project.id,basis,range.from,range.through).then(history=>{if(active)setResult({key,history,error:'',loading:false});},e=>{if(active)setResult(old=>({key,history:old?.key===key?old.history:null,error:String(e),loading:false}));}).finally(()=>{inFlight=false;if(active&&pending){pending=false;read();}});};
   refresh.current=read;return()=>{active=false;refresh.current=null;};
- },[api,key,ready]);
- useEffect(()=>{refresh.current?.();},[key,ready,refreshVersion,manual]);
+ },[api,key]);
+ useEffect(()=>{refresh.current?.();},[key,refreshVersion,manual]);
  const matching=result?.key===key?result:null,history=matching?.history;
- const selected=meta?.bases.find(b=>b.basisId===basis),name=basis==='legacy'?'이전 집계 (기준 미기록)':selected?.name??'선택한 진행 기준';
+ const selected=progress.bases.find(b=>b.basisId===basis),name=basis==='legacy'?'이전 집계 (기준 미기록)':selected?.name??'선택한 진행 기준';
  const points=useMemo(()=>history?historyChartPoints(history,version,name):[],[history,version,name]);
  const versions=useMemo(()=>[...new Set([version,...(history?.points.map(p=>p.basisVersion)??[]),...(selected?[selected.version]:[])])].sort((a,b)=>b-a),[history,selected,version]);
  const days=rangeDays(range.from,range.through)??0;
  function selectDate(date:string,override?:HistoryPoint){setSourceText('');setSourceError('');setDay({date,point:override??history?.points.find(p=>p.date===date&&p.basisVersion===version),opener:document.activeElement instanceof HTMLElement?document.activeElement:null});}
- function refreshNow(){if(period!=='custom'){const next=rangeFor(Number(period),today??kstToday());setRange(next);setDraftRange(next);}setManual(n=>n+1);}
+ function refreshNow(){if(period!=='custom'){const next=rangeFor(Number(period),today??kstToday());setRange(next);setDraftRange(next);}onRefresh();}
  const work=(history?.workEntries??[]).filter(v=>v&&typeof v==='object'&&!Array.isArray(v)&&(v.workDate===day?.date||v.effectiveDate===day?.date)) as Record<string,Json>[];
  return <div className="knowledge-history">
   <div className="history-filters">
-   <label>진행 기준<select aria-label="차트 진행 기준" value={basis} onChange={e=>{const next=e.target.value;setBasis(next);setVersion(meta?.bases.find(b=>b.basisId===next)?.version??0);}}><option value="legacy">이전 집계 (기준 미기록)</option>{meta?.bases.map(b=><option key={b.basisId} value={b.basisId}>{b.name}</option>)}</select></label>
+   <label>진행 기준<select aria-label="차트 진행 기준" value={basis} onChange={e=>{const next=e.target.value;setBasis(next);setVersion(progress.bases.find(b=>b.basisId===next)?.version??0);}}><option value="legacy">이전 집계 (기준 미기록)</option>{progress.bases.map(b=><option key={b.basisId} value={b.basisId}>{b.name}</option>)}</select></label>
    <label>기준 버전<select aria-label="차트 기준 버전" value={version} onChange={e=>setVersion(Number(e.target.value))}>{versions.map(v=><option key={v} value={v}>{v===0?'기준 미기록':'v'+v}</option>)}</select></label>
    <label>기간<select aria-label="기준별 차트 기간" value={period} onChange={e=>{setPeriod(e.target.value);if(e.target.value!=='custom'){const next=rangeFor(Number(e.target.value),today??kstToday());setRange(next);setDraftRange(next);}}}><option value="7">최근 7일</option><option value="30">최근 30일</option><option value="custom">사용자 기간</option></select></label>
    <button type="button" className="subtle-button" aria-label="기준별 차트 새로고침" onClick={refreshNow}>새로고침</button>

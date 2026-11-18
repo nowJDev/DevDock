@@ -6,10 +6,13 @@ import userEvent from '@testing-library/user-event';
 import App from '../../src/App';
 import type {Api,History,Snapshot,Registry} from '../../src/contracts';
 
+import type {ProgressBasis,ProjectHistory} from '../../src/knowledge/contracts';
+import {knowledgeFixture} from './knowledge-fixture';
+
 // jsdom에는 Canvas 렌더러가 없어 실제 표와 화면 데이터 흐름만 검사합니다.
 vi.mock('echarts/core',()=>({
  use:()=>{},
- init:()=>({setOption:()=>{},resize:()=>{},dispose:()=>{}}),
+ init:()=>({setOption:()=>{},resize:()=>{},dispose:()=>{},on:()=>{}}),
 }));
 
 function fixture() {
@@ -92,6 +95,53 @@ describe('DevDock dashboard',()=>{
   await waitFor(()=>expect(api.answerCheckout).toHaveBeenCalledWith(false,'2026-11-17'));
   expect(api.attendance).not.toHaveBeenCalled();
  });
+ it('opens restored history on the overview for a legacy project with a document basis',async()=>{
+  const {api,snapshot,listeners}=fixture();
+  const basis:ProgressBasis={basisId:'nas',projectId:'p1',version:1,kind:'feature',name:'문서 진행 기준',tasks:[],authoritativeSourceIds:[],sourceVersionIds:[]};
+  const f=knowledgeFixture();
+  const fallback=await f.api.progress('p1');
+  const counts={total:118,verified:0,reportedComplete:18,inProgress:40,blocked:0};
+  const knowledge=knowledgeFixture({
+   progress:vi.fn(async()=>({...fallback,projectId:'p1',basis,bases:[basis]})),
+   history:vi.fn(async(projectId:string,basisId:string,from:string,through:string):Promise<ProjectHistory>=>({
+    projectId,basisId,from,through,workEntries:[],
+    points:[{date:through,basisVersion:1,counts,origin:'reconstructed',coverage:'complete',capturedAt:through+'T12:00:00Z',sourceSpans:[]}],
+   })),
+  }).api;
+  const user=userEvent.setup();render(<App api={api} knowledge={knowledge}/>);
+  const panel=within(await screen.findByRole('region',{name:'프로젝트 일별 진행현황'}));
+  const basisSelect=await panel.findByRole('combobox',{name:'차트 진행 기준'});
+  expect(basisSelect).toHaveValue('nas');
+  expect(panel.getByRole('combobox',{name:'기준별 차트 기간'})).toHaveValue('30');
+  expect(within(basisSelect).getByRole('option',{name:/이전 집계/})).toBeInTheDocument();
+  expect(panel.queryByRole('button',{name:/기준·과거 이력|이전 집계 차트/})).not.toBeInTheDocument();
+  await user.click(await panel.findByText('일별 데이터 표'));
+  const restored=within(panel.getByRole('table').querySelector('tbody')!);
+  expect(restored.getByRole('cell',{name:'118'})).toBeInTheDocument();
+  expect(restored.getByRole('cell',{name:/복원/})).toBeInTheDocument();
+  expect(api.history).not.toHaveBeenCalled();
+  expect(knowledge.progress).toHaveBeenCalledTimes(1);
+  expect(knowledge.history).toHaveBeenCalledTimes(1);
+  await act(async()=>{snapshot.now='2026-11-18T08:15:00+09:00';listeners.get('dashboard-updated')!(null);});
+  expect(knowledge.progress).toHaveBeenCalledTimes(1);
+  expect(knowledge.history).toHaveBeenCalledTimes(1);
+  const chart=panel.getByRole('img',{name:'프로젝트 일별 진행현황 차트'});
+  await user.click(panel.getByRole('button',{name:'기준별 차트 새로고침'}));
+  await waitFor(()=>expect(knowledge.history).toHaveBeenCalledTimes(2));
+  expect(knowledge.progress).toHaveBeenCalledTimes(2);
+  expect(panel.getByRole('img',{name:'프로젝트 일별 진행현황 차트'})).toBe(chart);
+ });
+
+ it('retains observed history if the document basis cannot be read',async()=>{
+  const {api}=fixture();
+  const knowledge=knowledgeFixture({progress:vi.fn(async()=>{throw new Error('document offline');})}).api;
+  render(<App api={api} knowledge={knowledge}/>);
+  const panel=within(await screen.findByRole('region',{name:'프로젝트 일별 진행현황'}));
+  await waitFor(()=>expect(api.history).toHaveBeenCalledExactlyOnceWith('p1',168));
+  expect(panel.getByRole('combobox',{name:'진행현황 기간'})).toHaveValue('7');
+  expect(panel.queryByRole('button',{name:/기준·과거 이력|이전 집계 차트/})).not.toBeInTheDocument();
+ });
+
  it('queries only the selected overview project for seven or thirty days',async()=>{
   const {api,snapshot}=fixture();
   snapshot.projects.push({...snapshot.projects[0],id:'p2',name:'보안 점검과 운영 준비 현황'});
