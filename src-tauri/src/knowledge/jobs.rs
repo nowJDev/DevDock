@@ -69,9 +69,14 @@ pub(crate) fn check_lease(job: &Value, token: &str) -> Result<()> {
 }
 impl KnowledgeService {
     pub fn create_analysis_job(&self, request: Value) -> Result<Value> {
-        self.create_job(request, "progressAnalysis")
+        self.create_job(request, "progressAnalysis", None)
     }
-    pub(crate) fn create_job(&self, request: Value, kind: &str) -> Result<Value> {
+    pub(crate) fn create_job(
+        &self,
+        request: Value,
+        kind: &str,
+        extra: Option<Value>,
+    ) -> Result<Value> {
         let r: Request = serde_json::from_value(request).map_err(err)?;
         self.require_project(&r.project_id)?;
         let mut ids = vec![];
@@ -106,7 +111,10 @@ impl KnowledgeService {
             Value::Null
         };
         let id = Uuid::new_v4().to_string();
-        let job = json!({"jobId":id,"projectId":r.project_id,"kind":kind,"state":"pending","basisId":r.basis_id,"basisVersion":basis["version"],"expectedProjectRevision":ctl["revision"],"inputVersionIds":ids,"inputs":inputs,"allowedTaskIds":basis["tasks"].as_array().map(|ts|ts.iter().map(|t|t["taskId"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"createdAt":now(),"analysisVersion":1});
+        let mut job = json!({"jobId":id,"projectId":r.project_id,"kind":kind,"state":"pending","basisId":r.basis_id,"basisVersion":basis["version"],"expectedProjectRevision":ctl["revision"],"inputVersionIds":ids,"inputs":inputs,"allowedTaskIds":basis["tasks"].as_array().map(|ts|ts.iter().map(|t|t["taskId"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"createdAt":now(),"analysisVersion":1});
+        if let Some(extra) = extra {
+            job["publishContext"] = extra;
+        }
         tx.execute(
             "INSERT INTO analysis_jobs VALUES(?1,?2,?3,'pending',?4)",
             params![id, r.project_id, kind, job.to_string()],
@@ -262,6 +270,9 @@ impl KnowledgeService {
                 return Err("foreign source span".into());
             }
             let text = self.document_text(&span.version_id)?;
+            if super::publish_files::generated(&text) {
+                return Err("DevDock 게시 결과는 검증·진행 근거로 사용할 수 없습니다.".into());
+            }
             let object = span.locator.as_object().ok_or("invalid locator")?;
             if object.len() != 1 {
                 return Err("invalid locator".into());
@@ -416,27 +427,39 @@ impl KnowledgeService {
         )
     }
     pub fn parse_analysis_job(&self, id: &str) -> Result<Value> {
-        let claim = self.claim_analysis_job(id, "structured-parser")?;
-        let mut cs = vec![];
-        for input in claim["inputs"].as_array().unwrap() {
-            let version = input["versionId"].as_str().unwrap();
-            let path:String=self.db()?.query_row("SELECT json_extract(payload,'$.path') FROM document_versions WHERE version_id=?1",[version],|r|r.get(0)).map_err(err)?;
-            let mut parsed = parser::parse_document(
-                version,
-                input["sha256"].as_str().unwrap(),
-                &self.document_text(version)?,
-                &path,
-            )?;
-            for v in &mut parsed {
-                v.as_object_mut().unwrap().remove("fingerprint");
-                v.as_object_mut().unwrap().remove("reviewState");
-            }
-            cs.extend(parsed)
+        if self.get_analysis_job(id)?["kind"] != "progressAnalysis" {
+            return Err("진행 분석 요청이 아닙니다.".into());
         }
-        self.submit_analysis_result(
-            id,
-            claim["leaseToken"].as_str().unwrap(),
-            json!({"candidates":cs}),
-        )
+        let claim = self.claim_analysis_job(id, "structured-parser")?;
+        let result = (|| {
+            let mut cs = vec![];
+            for input in claim["inputs"].as_array().unwrap() {
+                let version = input["versionId"].as_str().unwrap();
+                let path:String=self.db()?.query_row("SELECT json_extract(payload,'$.path') FROM document_versions WHERE version_id=?1",[version],|r|r.get(0)).map_err(err)?;
+                let mut parsed = parser::parse_document(
+                    version,
+                    input["sha256"].as_str().unwrap(),
+                    &self.document_text(version)?,
+                    &path,
+                )?;
+                for v in &mut parsed {
+                    v.as_object_mut().unwrap().remove("fingerprint");
+                    v.as_object_mut().unwrap().remove("reviewState");
+                }
+                cs.extend(parsed)
+            }
+            self.submit_analysis_result(
+                id,
+                claim["leaseToken"].as_str().unwrap(),
+                json!({"candidates":cs}),
+            )
+        })();
+        if result.is_err() {
+            self.db()?.execute(
+                "UPDATE analysis_jobs SET state='failed',payload=json_set(json_remove(payload,'$.leaseToken'),'$.failure','structuredParser') WHERE job_id=?1 AND state='claimed' AND json_extract(payload,'$.leaseToken')=?2",
+                params![id,claim["leaseToken"].as_str()],
+            ).map_err(err)?;
+        }
+        result
     }
 }

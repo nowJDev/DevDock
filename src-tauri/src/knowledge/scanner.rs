@@ -40,7 +40,7 @@ pub fn run_bounded(mut command: Command, timeout: Duration) -> Result<()> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let mut child = command.spawn().map_err(err)?;
+    let (mut child, _owner) = crate::child_process::spawn(&mut command).map_err(err)?;
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -393,7 +393,24 @@ impl KnowledgeService {
                 let _ = fs::remove_file(p);
             }
         }
-        Ok(json!({"removed":removed}))
+        let cache = self.engine.data_dir().join("document-cache");
+        let mut orphaned=0;
+        if let Ok(entries)=fs::read_dir(cache) {
+            for entry in entries.flatten() {
+                let name=entry.file_name();
+                let Some(name)=name.to_str() else{continue;};
+                if name.len()!=64 || !name.bytes().all(|byte|byte.is_ascii_hexdigit()) {continue;}
+                if !entry.file_type().is_ok_and(|kind|kind.is_file()) {continue;}
+                let old=entry.metadata().and_then(|info|info.modified()).ok()
+                    .and_then(|time|time.elapsed().ok()).is_some_and(|age|age.as_secs()>30*86400);
+                if !old {continue;}
+                let referenced:bool=c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM document_versions WHERE sha256=?1)",[name],|row|row.get(0),
+                ).map_err(err)?;
+                if !referenced && fs::remove_file(entry.path()).is_ok() {orphaned+=1;}
+            }
+        }
+        Ok(json!({"removed":removed,"orphaned":orphaned}))
     }
     pub fn scan_document_sources(&self, ids: &[String], force: bool) -> Result<Value> {
         self.scan_with_executable(
@@ -435,7 +452,7 @@ impl KnowledgeService {
         for s in subset {
           let stage=self.engine.data_dir().join("document-staging").join(Uuid::new_v4().to_string());fs::create_dir_all(&stage).map_err(err)?;
           let mut known=json!({});let c=self.db()?;let mut q=c.prepare("SELECT normalized_path,payload FROM documents WHERE source_id=?1").map_err(err)?;
-          for row in q.query_map([s["sourceId"].as_str().unwrap()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(err)? {let(p,v)=row.map_err(err)?;known[s["sourceId"].as_str().unwrap()][p]=serde_json::from_str(&v).map_err(err)?;}
+          for row in q.query_map([s["sourceId"].as_str().unwrap()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(err)? {let(p,v)=row.map_err(err)?;let mut v:Value=serde_json::from_str(&v).map_err(err)?;let key=v["path"].as_str().unwrap_or(&p).to_owned();known[s["sourceId"].as_str().unwrap()][key]=v.take();}
           drop(q);drop(c);
           let last=self.source_states()?["sources"].as_array().unwrap().iter().find(|v|v["sourceId"]==s["sourceId"]).cloned().unwrap_or(json!({}));
           let rehash=force||last["lastHashAt"].as_str().and_then(|v|chrono::DateTime::parse_from_rfc3339(v).ok()).is_none_or(|at|chrono::Utc::now().signed_duration_since(at).num_seconds()>=300);
@@ -550,7 +567,10 @@ impl KnowledgeService {
             let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
             tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,normalized_path) DO UPDATE SET payload=excluded.payload",params![id,sid,normalized,f.to_string()]).map_err(err)?;
             let hash = f["sha256"].as_str().unwrap();
-            let kind = if path.ends_with(".json") {
+            let body = fs::read_to_string(&target).map_err(err)?;
+            let kind = if super::publish_files::generated(&body) {
+                "generatedPublication"
+            } else if path.ends_with(".json") {
                 "structured"
             } else if path.to_lowercase().contains("handover") {
                 "handover"
@@ -575,7 +595,6 @@ impl KnowledgeService {
                 self.require_project(project)?;
                 tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'source','accepted')",params![id,project]).map_err(err)?;
             } else if source["scope"] == "global" {
-                let body = fs::read_to_string(&target).map_err(err)?;
                 let reg = self.engine.registry()?;
                 let projects =
                     super::parser::match_projects(path, &body, reg["projects"].as_array().unwrap());

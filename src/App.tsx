@@ -7,7 +7,9 @@ import DailyProgressChart from './components/charts/DailyProgressChart';
 import ProgressChart from './components/charts/ProgressChart';
 import DocumentSettings from './knowledge/DocumentSettings';
 import ProjectKnowledge from './knowledge/ProjectKnowledge';
+import {ProjectActions,ProjectActionDialog,type ProjectAction} from './knowledge/ProjectActions';
 import KnowledgeHistory from './knowledge/KnowledgeHistory';
+import './styles/project-actions.css';
 import Modal from './components/Dialog';
 import {knowledgeApi as defaultKnowledge,type KnowledgeApi} from './knowledge/api';
 type Page='overview'|'projects'|'monitors'|'activity'|'settings';
@@ -82,14 +84,14 @@ function ProjectSource({project,summary=false,current=false}:{project:ProjectPro
    :<span className="warning-text">{project.sourceErrors?.map((error,i)=><span key={i}>소스 오류: {error}</span>)}</span>)}
  </span>;
 }
-function ProgressRows({projects,onSelect}:{projects:ProjectProgress[];onSelect:(p:ProjectProgress)=>void}){
+function ProgressRows({projects,onSelect,onAction}:{projects:ProjectProgress[];onSelect:(p:ProjectProgress)=>void;onAction:(value:ProjectAction)=>void}){
  if(!projects.length)return <div className="empty-project"><FolderKanban size={30}/><h3>첫 프로젝트를 연결하세요.</h3><p>체크리스트와 검증 근거를 연결하면 진행상황을 확인할 수 있습니다.</p></div>;
- return <div className="project-rows">{projects.map(p=><button className="project-row" key={p.id} onClick={()=>onSelect(p)}>
+ return <div className="project-rows">{projects.map(p=><article className="project-list-item" key={p.id}><button className="project-row" type="button" aria-label={p.name+' 상세 열기'} onClick={()=>onSelect(p)}>
   <span className="project-icon"><FolderKanban size={19}/></span>
   <span className="project-copy"><strong>{p.name}</strong><span>{p.currentTask||'현재 작업 정보가 없습니다.'}</span><ProjectSource project={p} summary/></span>
   <span className="project-progress"><span className="progress-track"><i style={{width:(p.total?p.verified/p.total*100:0)+'%'}}/><b style={{width:(p.total?p.reportedComplete/p.total*100:0)+'%'}}/></span><span className="progress-caption"><span>검증 완료 {p.verified}</span><span>완료 보고 {p.reportedComplete}</span><span>전체 {p.total}개</span></span></span>
   <span className="project-row-end">{p.blocked>0&&<span className="warning-count">막힘 {p.blocked}</span>}<ChevronRight size={17}/></span>
- </button>)}</div>;
+ </button><ProjectActions project={p} onAction={onAction}/></article>)}</div>;
 }
 
 const attendanceActions:Record<string,string>={checkIn:'출근',checkOut:'퇴근'};
@@ -129,6 +131,7 @@ const monitorStates:Record<string,{label:string;tone:string}>={
 export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Api;knowledge?:KnowledgeApi}){
  const [page,setPage]=useState<Page>('overview');const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [registry,setRegistry]=useState<Registry|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const [subscriptionError,setSubscriptionError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('');const [selected,setSelected]=useState<ProjectProgress|null>(null);const [form,setForm]=useState<'project'|'monitor'|null>(null);const [remove,setRemove]=useState<{entity:'project'|'monitor';item:Project|Monitor}|null>(null);const [editing,setEditing]=useState<Project|Monitor|null>(null);const [checkout,setCheckout]=useState<{date:string;returnFocus:HTMLElement|null}|null>(null);const [baseRevision,setBaseRevision]=useState<number|undefined>();const [monitorKind,setMonitorKind]=useState('checklist');const settingsDirty=useRef(false);const [settings,setSettings]=useState<Settings|null>(null);const declineRef=useRef<HTMLButtonElement>(null);
  const [documentsOpen,setDocumentsOpen]=useState(false);
+ const [projectAction,setProjectAction]=useState<ProjectAction|null>(null);
  const [chartRefresh,setChartRefresh]=useState(0);
  const [historyMode,setHistoryMode]=useState<'auto'|'legacy'|'knowledge'>('auto');
  const [days,setDays]=useState<7|30>(7);
@@ -231,7 +234,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      :<p className="history-pending" role="status">일별 진행 기록을 불러오는 중입니다.</p>}
    </div>:<div className="empty-project"><FolderKanban size={24}/><h3>연결된 프로젝트가 없습니다.</h3><p>프로젝트를 연결하면 일별 진행 기록을 볼 수 있습니다.</p></div>}
   </section>
-  <section className="panel project-panel"><div className="section-heading"><div><h2>프로젝트 진행상황 <span className="count">{projects.length}</span></h2><p>완료 보고와 실제 검증 근거를 구분합니다.</p></div><button className="text-button" onClick={()=>setPage('projects')}>전체 보기 <ArrowUpRight size={15}/></button></div><ProgressRows projects={projects} onSelect={p=>{setSelected(p);setPage('projects');}}/></section>
+  <section className="panel project-panel"><div className="section-heading"><div><h2>프로젝트 진행상황 <span className="count">{projects.length}</span></h2><p>완료 보고와 실제 검증 근거를 구분합니다.</p></div><button className="text-button" onClick={()=>setPage('projects')}>전체 보기 <ArrowUpRight size={15}/></button></div><ProgressRows projects={projects} onAction={setProjectAction} onSelect={p=>{setSelected(p);setPage('projects');}}/></section>
   <div className="overview-operations">
    <section className="panel runtime-panel" aria-labelledby="runtime-title">
     <div className="section-heading"><div><h2 id="runtime-title">런타임 현재 상태</h2><p>5초 주기 점검</p></div></div>
@@ -243,7 +246,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  </>}
  {page==='projects'&&snapshot&&<>
   <div className="list-toolbar"><div className="search"><Search size={16}/><input aria-label="프로젝트 검색" placeholder="프로젝트 검색" value={filter} onChange={e=>setFilter(e.target.value)}/></div><span className="small">총 {projects.length}개 프로젝트</span></div>
-  <section className="panel" aria-labelledby="projects-title"><h2 className="sr-only" id="projects-title">프로젝트 목록</h2><ProgressRows projects={projects} onSelect={setSelected}/></section>
+  <section className="panel" aria-labelledby="projects-title"><h2 className="sr-only" id="projects-title">프로젝트 목록</h2><ProgressRows projects={projects} onAction={setProjectAction} onSelect={setSelected}/></section>
   {selected&&<section className="panel detail">
    <div className="section-heading">
     <div><h2>{selected.name}</h2><p>{selected.root}</p></div>
@@ -253,6 +256,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      <button className="icon-button" aria-label="상세 닫기" onClick={()=>setSelected(null)}><X size={17}/></button>
     </div>
    </div>
+   <ProjectActions project={selected} onAction={setProjectAction}/>
    <ProjectKnowledge key={selected.id} api={knowledge} project={selected} refreshVersion={snapshotVersion}><div className="detail-summary"><span>전체 {selected.total}개</span><span className={selected.verified?'good-text':undefined}>검증 완료 {selected.verified}</span><span>완료 보고 {selected.reportedComplete}</span><span>막힘 {selected.blocked}</span></div>
    <div className="detail-source"><ProjectSource project={selected}/></div>
    {selected.tasks.length?<ul className="task-list">{selected.tasks.map(t=><li key={t.id}><span className={'task-dot '+t.state}/><span>{t.title}</span><small>{t.verified?'검증 완료':taskLabels[t.state]??t.state}{t.verificationEvidence?.map(e=><span key={e.id}> · {e.kind} · {e.reference} · {e.success?'성공':'실패'} · {e.subjectRevision} · {e.verifiedAt}</span>)}</small></li>)}</ul>:<p className="empty-copy">연결된 상세 작업 목록이 없습니다.</p>}
@@ -289,6 +293,9 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  <footer className="main-footer"><span><ShieldCheck size={13}/> 관측한 사실과 검증 근거를 기준으로 표시합니다.</span><span>로컬 저장 · {Intl.DateTimeFormat().resolvedOptions().timeZone||'시스템 로컬 시간'}</span></footer></main></div>
  {form&&<Modal title={editing?(form==='project'?'프로젝트 수정':'모니터 수정'):(form==='project'?'프로젝트 연결':'모니터링 항목 추가')} returnFocus={mutationTrigger.current} onClose={()=>setForm(null)}><form onSubmit={submitForm}>{error&&<p className="alert error">{error}</p>}<label className="field">이름<input name="name" defaultValue={editing?.name??''} required autoFocus placeholder={form==='project'?'프로젝트 이름':'모니터링 항목 이름'}/></label>{form==='project'?<><label className="field">프로젝트 폴더<input name="root" defaultValue={editing&&'root' in editing?editing.root:''} required placeholder="프로젝트의 전체 경로"/></label><label className="field">체크리스트 파일<input name="checklistPath" defaultValue={editing&&'checklistPath' in editing?editing.checklistPath:''} placeholder="선택 사항 · Markdown 파일 경로"/></label></>:<><label className="field">종류<select name="kind" value={monitorKind} onChange={e=>setMonitorKind(e.target.value)}><option value="checklist">체크리스트</option><option value="structuredStatus">구조화 상태</option><option value="daemon">데몬</option></select></label><label className="field">{monitorKind==='daemon'?<>데몬 대상<select name="source" defaultValue={editing&&'source' in editing?editing.source:'A'}><option value="A">A</option><option value="B">B</option></select></>:<>소스 경로<input name="source" defaultValue={editing&&'source' in editing?editing.source:''} required placeholder="파일 경로"/></>}</label><label className="field">프로젝트<select name="projectId" required={monitorKind!=='daemon'} defaultValue={editing&&'projectId' in editing?editing.projectId??'':''}><option value="">프로젝트 선택</option>{activeProjects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label></>}<div className="modal-actions"><button type="button" className="subtle-button" onClick={()=>setForm(null)}>취소</button><button className="primary-button" disabled={busy} type="submit">{editing?'저장':'연결'}</button></div></form></Modal>}
  {remove&&<Modal title={remove.entity==='project'?'프로젝트 제거':'모니터링 항목 제거'} returnFocus={mutationTrigger.current} onClose={()=>setRemove(null)}>{error&&<p className="alert error">{error}</p>}<p className="modal-copy">{remove.item.name} 항목을 목록에서 제거합니다. 원본 파일과 프로젝트는 보존합니다.</p><div className="modal-actions"><button className="subtle-button" autoFocus onClick={()=>setRemove(null)}>취소</button><button className="danger-button" disabled={busy} onClick={()=>void perform(()=>api.mutate({entity:remove.entity,action:'remove',id:remove.item.id},baseRevision),'항목을 제거했습니다.').then(ok=>{if(ok)setRemove(null);})}>{remove.entity==='project'?'목록에서 제거':'항목 제거'}</button></div></Modal>}
+ {projectAction&&<ProjectActionDialog key={projectAction.project.id+projectAction.action} api={knowledge} value={projectAction}
+  onClose={()=>setProjectAction(null)}
+  onSettings={()=>{setProjectAction(null);setPage('settings');setDocumentsOpen(true);}}/>}
  {checkout&&<Modal title="스마트원 퇴근을 실행할까요." returnFocus={checkout.returnFocus} onClose={()=>void answer(false)}>{error&&<p className="alert error">{error}</p>}<div className="prompt-icon"><Clock3 size={25}/></div><p className="modal-copy">{checkout.date} 퇴근을 기록할 수 있습니다. 실행을 선택하면 실제 스마트원 퇴근이 처리됩니다.</p><p className="small">현재 기록은 {snapshot?.attendance.message||'서버 상태 확인 필요'}입니다.</p><div className="modal-actions"><button ref={declineRef} className="subtle-button" onClick={()=>void answer(false)}>오늘은 안 함</button><button className="primary-button" disabled={busy} onClick={()=>void answer(true)}>실행</button></div></Modal>}
 
  </div>;

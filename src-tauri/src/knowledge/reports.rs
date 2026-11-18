@@ -142,6 +142,9 @@ fn package(path: &str, include: bool) -> Result<Value> {
     Ok(json!({"hash":sha256(digest.to_string().as_bytes()),"files":files}))
 }
 fn network_path(path: &Path) -> bool {
+    if super::publish_files::is_unc(path) {
+        return true;
+    }
     let text = path.to_string_lossy();
     if text.starts_with("\\\\") && !text.starts_with("\\\\?\\") {
         return true;

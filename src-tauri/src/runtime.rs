@@ -498,6 +498,39 @@ pub mod desktop {
         Ok(())
     }
     pub fn background(app: AppHandle, r: Runtime) {
+        if !r.safe {
+            for id in ["A", "B"] {
+                let engine = r.engine.clone();
+                let updates = app.clone();
+                std::thread::spawn(move || {
+                    let Some(cli) = daemon::locate_cli() else {
+                        return;
+                    };
+                    let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
+                        return;
+                    };
+                    let source = home.join(if id == "A" { ".codex" } else { ".codex-B" });
+                    let enabled = || {
+                        engine
+                            .registry()
+                            .and_then(|value| super::daemon_sources(&value))
+                            .is_ok_and(|ids| ids.contains(&id))
+                    };
+                    loop {
+                        if enabled() {
+                            daemon::observe_status_stream(&cli, &source, enabled, |params| {
+                                if enabled() && engine.record_event(json!({
+                                    "daemonId":id,"method":"thread/status/changed","params":params,
+                                })).is_ok() {
+                                    changed(&updates);
+                                }
+                            });
+                        }
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                });
+            }
+        }
         let maintenance_engine = r.engine.clone();
         std::thread::spawn(move || {
             super::maintenance_worker(

@@ -1,6 +1,6 @@
 // 기존 설정 파일을 보존하며 문서 관리 원장과 충돌 방지 저장을 제공한다.
 use super::{err, models::*, KnowledgeService, Result};
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 pub(crate) fn initialize(c: &mut Connection) -> Result<()> {
     let tx = c
@@ -129,6 +129,28 @@ impl KnowledgeService {
             ("project", Some(id)) => self.require_project(id)?,
             ("global", None) => {}
             _ => return Err("invalid source scope".into()),
+        }
+        if !s.publish_targets.is_empty() {
+            if s.scope != "project"
+                || s.location != "nas"
+                || !super::publish_files::is_unc(std::path::Path::new(&s.root))
+            {
+                return Err(
+                    "게시 대상은 프로젝트에 연결한 UNC NAS 폴더에서만 설정할 수 있습니다.".into(),
+                );
+            }
+            super::publish_files::validate_targets(&s.publish_targets)?;
+        }
+        let prior: Option<String> = tx.query_row(
+            "SELECT payload FROM document_sources WHERE source_id=?1 AND EXISTS(SELECT 1 FROM documents WHERE source_id=?1)",
+            [&s.source_id],|r|r.get(0),
+        ).optional().map_err(err)?;
+        if let Some(payload) = prior {
+            let old: DocumentSource = serde_json::from_str(&payload).map_err(err)?;
+            if old.scope != s.scope || old.project_id != s.project_id || old.location != s.location
+            {
+                return Err("기존 문서 이력을 보존하려면 새 문서 폴더로 등록해 주세요.".into());
+            }
         }
         bump(&tx, expected)?;
         tx.execute("INSERT INTO document_sources(source_id,payload) VALUES(?1,?2) ON CONFLICT(source_id) DO UPDATE SET payload=excluded.payload",params![s.source_id,serde_json::to_string(&s).map_err(err)?]).map_err(err)?;

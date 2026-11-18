@@ -45,7 +45,27 @@ fn run(engine: &Engine, args: &[String]) -> Result<Value, String> {
 }
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    if let [flag,path]=args.as_slice(){if flag=="--report-source-worker"{match devdock_core::knowledge::report_worker::run_report_source_worker(std::path::Path::new(path)){Ok(v)=>println!("{}",v),Err(_)=>process::exit(1)}return;}}
+    if let [flag, data] = args.as_slice() {
+        if flag == "--nas-folder-worker" {
+            devdock_core::knowledge::nas_folder::worker_main(std::path::Path::new(data));
+            return;
+        }
+        if flag == "--document-publish-worker" {
+            devdock_core::knowledge::publisher::write_worker_response(std::path::Path::new(data));
+            return;
+        }
+    }
+    if let [flag, path] = args.as_slice() {
+        if flag == "--report-source-worker" {
+            match devdock_core::knowledge::report_worker::run_report_source_worker(
+                std::path::Path::new(path),
+            ) {
+                Ok(v) => println!("{}", v),
+                Err(_) => process::exit(1),
+            }
+            return;
+        }
+    }
     if let [flag, path] = args.as_slice() {
         if flag == "--document-scan-worker" {
             if devdock_core::knowledge::scanner::run_scan_worker(std::path::Path::new(path))

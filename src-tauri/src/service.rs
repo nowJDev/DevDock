@@ -78,6 +78,7 @@ impl Engine {
         crate::knowledge::store::initialize(&mut c)?;
         if recover {
             crate::knowledge::reports::expire_on_start(&e.knowledge())?;
+            crate::knowledge::publisher::recover(&e.knowledge())?;
             c.execute(
                 "UPDATE runs SET state='uncertain' WHERE state='pending'",
                 [],
@@ -616,6 +617,9 @@ impl Engine {
                 }
             }
             "item/completed" | "item.completed" => "working",
+            "thread/status/changed" if p["status"].is_object() => {
+                crate::daemon::activity_from_status(&p["status"])
+            }
             "thread/status/changed" => match status {
                 "active" => "working",
                 "idle" => "idle",

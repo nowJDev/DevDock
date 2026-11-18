@@ -43,6 +43,7 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
   const [destination,setDestination]=useState(''),[savePreview,setSavePreview]=useState<SavePreview|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const [page,setPage]=useState(0),[more,setMore]=useState(false);
+  const [recent,setRecent]=useState<(Request&{state:string;createdAt:string})[]>([]);
 
   useEffect(()=>{
     let current=true;
@@ -52,6 +53,11 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
         setProfile(p);setHeading(p.workHeading||project.name);setMode(p.templateMode);setCustom(p.customTemplate??'');
         setSources(c.sources);setDocs(d.documents);setMore(d.documents.length===d.pageSize);
       },e=>{if(current)setError(errorMessage(e));});
+    void api.jobs(project.id).then(({jobs})=>{
+      if(current)setRecent(jobs.filter(j=>j.kind==='dailyReport'&&j.requestId&&j.state!=='resultExpired').map(j=>({
+        requestId:j.requestId!,jobId:j.jobId,state:j.state,createdAt:j.createdAt,
+      })));
+    },()=>{});
     return()=>{current=false;};
   },[api,project.id,project.name]);
   useEffect(()=>{
@@ -92,6 +98,7 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
         customTemplate:mode==='custom'?custom:null,allowCrossProject:crossProject,
       }});
       setDestination(profile?.localSaveDirectory?fullPath(profile.localSaveDirectory,date+' 일일보고.txt'):'');
+      setRecent(previous=>[{...next,state:'pending',createdAt:new Date().toISOString()},...previous]);
       setRequest(next);
     });
   }
@@ -103,6 +110,12 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
     {error&&<p className="alert error" role="alert">{error}</p>}
     {notice&&<p className="knowledge-status" role="status">{notice}</p>}
     {!request&&profile&&<form className="knowledge-content" onSubmit={create}>
+      {recent.length>0&&<details className="source-path"><summary>이전 보고 요청</summary>
+        {recent.map(item=><div className="analysis-job" key={item.requestId}>
+          <span>{new Date(item.createdAt).toLocaleString('ko-KR')}<small>{item.requestId}</small></span>
+          <button className="subtle-button" type="button" disabled={busy} onClick={()=>setRequest(item)}>요청 열기</button>
+        </div>)}
+      </details>}
       <div className="knowledge-fields">
         <label className="field">보고 날짜<input type="date" required value={date} onChange={e=>setDate(e.target.value)}/></label>
         <label className="field">업무 헤더<input required maxLength={1024} value={heading} onChange={e=>setHeading(e.target.value)}/></label>

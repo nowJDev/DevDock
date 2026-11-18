@@ -52,6 +52,41 @@ enum Command {
         expected_sha256: Option<String>,
         overwrite: bool,
     },
+    CreatePublishDraftRequest {
+        request: Value,
+    },
+    SubmitPublishDraftResult {
+        job_id: String,
+        lease_token: String,
+        result: Value,
+    },
+    PrepareDocumentPublish {
+        job_id: String,
+        paths: Vec<String>,
+        task_keys: Vec<String>,
+        input_version_ids: Vec<String>,
+    },
+    ApplyDocumentPublish {
+        run_id: String,
+        plan_hash: String,
+        paths: Vec<String>,
+    },
+    RestoreDocumentPublish {
+        run_id: String,
+        plan_hash: String,
+        paths: Vec<String>,
+    },
+    GetDocumentPublishStatus {
+        run_id: String,
+    },
+    ListDocumentPublishes {
+        project_id: String,
+    },
+    OpenProjectNasFolder {
+        project_id: String,
+        source_id: String,
+        shortcut: String,
+    },
     GetDocumentConfig {},
     SaveDocumentConfig {
         config: Value,
@@ -207,7 +242,7 @@ pub fn read_only(input: &Value) -> bool {
     )
 }
 impl KnowledgeService {
-    pub fn execute_command(&self, input: Value, preview: bool, _safe: bool) -> Result<Value> {
+    pub fn execute_command(&self, input: Value, preview: bool, safe: bool) -> Result<Value> {
         if preview && !read_only(&input) {
             return Err("읽기 전용 미리보기에서는 문서와 진행 현황을 변경할 수 없습니다.".into());
         }
@@ -251,6 +286,41 @@ impl KnowledgeService {
                 expected_sha256.as_deref(),
                 overwrite,
             ),
+            Command::CreatePublishDraftRequest { request } => {
+                self.create_publish_draft_request(request)
+            }
+            Command::SubmitPublishDraftResult {
+                job_id,
+                lease_token,
+                result,
+            } => self.submit_publish_draft_result(&job_id, &lease_token, result),
+            Command::PrepareDocumentPublish {
+                job_id,
+                paths,
+                task_keys,
+                input_version_ids,
+            } => self.prepare_document_publish(&job_id, paths, task_keys, input_version_ids),
+            Command::ApplyDocumentPublish {
+                run_id,
+                plan_hash,
+                paths,
+            } => self.execute_publish(&run_id, &plan_hash, paths, false, safe),
+            Command::RestoreDocumentPublish {
+                run_id,
+                plan_hash,
+                paths,
+            } => self.execute_publish(&run_id, &plan_hash, paths, true, safe),
+            Command::GetDocumentPublishStatus { run_id } => {
+                self.get_document_publish_status(&run_id)
+            }
+            Command::ListDocumentPublishes { project_id } => {
+                self.list_document_publishes(&project_id)
+            }
+            Command::OpenProjectNasFolder {
+                project_id,
+                source_id,
+                shortcut,
+            } => self.open_project_nas_folder(project_id, source_id, shortcut),
             Command::GetDocumentConfig {} => self.get_document_config(),
             Command::SaveDocumentConfig {
                 config,
@@ -402,6 +472,10 @@ pub fn cli_request(args: &[String]) -> Result<Option<(Value, bool)>> {
         ("reports", "heartbeat") => "heartbeat_analysis_job",
         ("reports", "read-source") => "read_report_source",
         ("reports", "submit") => "submit_report_result",
+        ("documents", "publish-create") => "create_publish_draft_request",
+        ("documents", "publish-submit") => "submit_publish_draft_result",
+        ("documents", "publish-status") => "get_document_publish_status",
+        ("documents", "publish-list") => "list_document_publishes",
         ("documents", "config") => "get_document_config",
         ("documents", "save-config") => "save_document_config",
         ("documents", "source-upsert") => "upsert_document_source",

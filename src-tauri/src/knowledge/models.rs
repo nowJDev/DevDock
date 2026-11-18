@@ -35,6 +35,8 @@ pub struct DocumentSource {
     pub exclude: Vec<String>,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_targets: Vec<super::publish_files::Target>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

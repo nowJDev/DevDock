@@ -42,10 +42,12 @@ pub fn match_projects(filename: &str, body: &str, projects: &[Value]) -> Vec<Str
             token
                 && !root.is_empty()
                 && body.match_indices(&root).any(|(at, _)| {
-                    body[at + root.len()..]
-                        .chars()
-                        .next()
-                        .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    let boundary = |c: char| c.is_whitespace() || "`'\"()[]<>,;".contains(c);
+                    body[..at].chars().next_back().is_none_or(boundary)
+                        && body[at + root.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|c| c == '/' || boundary(c))
                 })
         })
         .filter_map(|p| p["id"].as_str().map(str::to_owned))

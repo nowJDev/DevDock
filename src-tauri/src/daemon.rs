@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
+    collections::HashMap,
     env,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -160,7 +161,9 @@ fn websocket_response<S: Read + Write>(
         }
     }
 }
-fn query_websocket<S: Read + Write>(ws: &mut tungstenite::WebSocket<S>) -> Result<String, String> {
+fn loaded_states<S: Read + Write>(
+    ws: &mut tungstenite::WebSocket<S>,
+) -> Result<HashMap<String, &'static str>, String> {
     websocket_send(
         ws,
         Some(1),
@@ -172,10 +175,7 @@ fn query_websocket<S: Read + Write>(ws: &mut tungstenite::WebSocket<S>) -> Resul
     websocket_send(ws, Some(2), "thread/loaded/list", json!({"limit":100}))?;
     let loaded = websocket_response(ws, 2)?;
     let ids = loaded["data"].as_array().ok_or("invalid loaded list")?;
-    if ids.is_empty() {
-        return Ok("unknown".into());
-    }
-    let mut states = Vec::new();
+    let mut states = HashMap::new();
     for (i, item) in ids.iter().take(100).enumerate() {
         let tid = item
             .as_str()
@@ -188,13 +188,125 @@ fn query_websocket<S: Read + Write>(ws: &mut tungstenite::WebSocket<S>) -> Resul
             json!({"threadId":tid,"includeTurns":false}),
         )?;
         let r = websocket_response(ws, i as u64 + 3)?;
-        states.push(activity_from_status(&r["thread"]["status"]));
+        states.insert(tid.to_owned(), activity_from_status(&r["thread"]["status"]));
     }
-    Ok(["approval", "input", "working", "failed", "idle"]
+    Ok(states)
+}
+fn aggregate(states: &HashMap<String, &'static str>) -> &'static str {
+    ["approval", "input", "working", "failed", "idle"]
         .into_iter()
-        .find(|s| states.contains(s))
+        .find(|state| states.values().any(|current| current == state))
         .unwrap_or("unknown")
-        .into())
+}
+fn query_websocket<S: Read + Write>(ws: &mut tungstenite::WebSocket<S>) -> Result<String, String> {
+    loaded_states(ws).map(|states| aggregate(&states).to_owned())
+}
+fn passive_event(value: &Value, states: &mut HashMap<String, &'static str>) -> Option<Value> {
+    if value.get("id").is_some() || value["method"] != "thread/status/changed" {
+        return None;
+    }
+    let thread = value.pointer("/params/threadId")?.as_str()?;
+    if thread.is_empty()
+        || thread.len() > 128
+        || (!states.contains_key(thread) && states.len() >= 200)
+    {
+        return None;
+    }
+    let state = activity_from_status(value.pointer("/params/status")?);
+    if state == "unknown" {
+        states.remove(thread);
+    } else {
+        states.insert(thread.into(), state);
+    }
+    let status = match aggregate(states) {
+        "approval" => json!({"type":"active","activeFlags":["waitingOnApproval"]}),
+        "input" => json!({"type":"active","activeFlags":["waitingOnUserInput"]}),
+        "working" => json!({"type":"active","activeFlags":[]}),
+        "failed" => json!({"type":"systemError"}),
+        "idle" => json!({"type":"idle"}),
+        _ => json!({"type":"notLoaded"}),
+    };
+    Some(json!({"threadId":thread,"status":status}))
+}
+pub fn observe_status_stream(
+    cli: &Path,
+    home: &Path,
+    mut keep: impl FnMut() -> bool,
+    mut receive: impl FnMut(Value),
+) {
+    enum Message {
+        Ready,
+        Status(Value),
+    }
+    let mut command = Command::new(cli);
+    command
+        .args(["app-server", "proxy"])
+        .env("CODEX_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let Ok((mut child, _owner)) = crate::child_process::spawn(&mut command) else {
+        return;
+    };
+    let input = child.stdin.take().unwrap();
+    let output = child.stdout.take().unwrap();
+    let (send, read) = mpsc::sync_channel(64);
+    let reader = thread::spawn(move || {
+        let Ok((mut ws, _)) = tungstenite::client(
+            "ws://localhost/",
+            ProxyPipe {
+                stdin: input,
+                stdout: output,
+            },
+        ) else {
+            return;
+        };
+        let Ok(mut states) = loaded_states(&mut ws) else {
+            return;
+        };
+        if send.send(Message::Ready).is_err() {
+            return;
+        }
+        while let Ok(message) = ws.read() {
+            match message {
+                tungstenite::Message::Text(text) => {
+                    if let Ok(data) = serde_json::from_str(&text) {
+                        if let Some(event) = passive_event(&data, &mut states) {
+                            if send.try_send(Message::Status(event)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                tungstenite::Message::Ping(_) => {
+                    if ws.flush().is_err() {
+                        break;
+                    }
+                }
+                tungstenite::Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let start = Instant::now();
+    let mut ready = false;
+    while keep() && start.elapsed() < Duration::from_secs(300) {
+        match read.recv_timeout(Duration::from_secs(1)) {
+            Ok(Message::Ready) => ready = true,
+            Ok(Message::Status(value)) if ready => receive(value),
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout)
+                if ready || start.elapsed() < Duration::from_secs(3) => {}
+            Err(_) => break,
+        }
+    }
+    drop(read);
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(_owner);
+    let _ = reader.join();
 }
 fn wait_for_proxy(
     rx: &mpsc::Receiver<Result<String, String>>,
@@ -215,7 +327,8 @@ pub fn observe(id: &str, cli: &Path, home: &Path) -> Value {
             .stderr(Stdio::null());
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
-        let mut child = cmd.spawn().map_err(|_| "proxy spawn failed")?;
+        let (mut child, _owner) =
+            crate::child_process::spawn(&mut cmd).map_err(|_| "proxy spawn failed")?;
         let input = child.stdin.take().ok_or("missing stdin")?;
         let output = child.stdout.take().ok_or("missing stdout")?;
         let (tx, rx) = mpsc::channel();
@@ -238,7 +351,7 @@ pub fn observe(id: &str, cli: &Path, home: &Path) -> Value {
     })();
     match result {
         Ok(activity) => {
-            json!({"id":id,"observedAt":Local::now().to_rfc3339(),"transportState":if started.elapsed() > Duration::from_secs(2) {"slow"} else {"healthy"},"activityState":activity,"latencyMs":started.elapsed().as_millis() as u64,"reason":"읽기 전용 작업 스냅샷; 세부 이벤트 미구독"})
+            json!({"id":id,"observedAt":Local::now().to_rfc3339(),"transportState":if started.elapsed() > Duration::from_secs(2) {"slow"} else {"healthy"},"activityState":activity,"latencyMs":started.elapsed().as_millis() as u64,"reason":"읽기 전용 스냅샷과 지원되는 상태 알림"})
         }
         Err(reason) => observation_from_error(id, &format!("프록시 상태 조회 불가: {reason}")),
     }
@@ -334,4 +447,16 @@ mod websocket_tests {
         assert!(wait_for_proxy(&rx, Duration::from_millis(20)).is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn passive_status_preserves_other_active_threads_and_ignores_server_requests() {
+    use std::collections::HashMap;
+    let mut states = HashMap::from([("other".to_owned(), "approval")]);
+    let mut update = json!({"method":"thread/status/changed","params":{"threadId":"worker","status":{"type":"idle"}}});
+    let event = passive_event(&update, &mut states).unwrap();
+    assert_eq!(event["status"]["activeFlags"][0], "waitingOnApproval");
+    update["id"] = json!(52);
+    assert!(passive_event(&update, &mut states).is_none());
 }

@@ -3,7 +3,7 @@ import {useEffect,useRef,useState,type FormEvent} from 'react';
 import {FolderPlus,FolderOpen,RefreshCw} from 'lucide-react';
 import type {Project} from '../contracts';
 import type {KnowledgeApi,SourceState} from './api';
-import type {DocumentConfigView,DocumentSource} from './contracts';
+import type {DocumentConfigView,DocumentSource,PublishTarget} from './contracts';
 import ReportSettings from './ReportSettings';
 const roles=[['handover','핸드오버'],['dailyLog','일자별 작업기록'],['checklist','기준 체크리스트'],['review','검토·검증 결과'],['reference','참고 문서'],['publicationReceipt','게시 영수증']];
 const states:Record<string,string>={online:'연결 정상',partial:'일부만 읽음',offline:'오프라인',denied:'접근 권한 없음',timeout:'연결 시간 초과',unknown:'아직 확인 전',error:'연결 확인 실패'};
@@ -18,7 +18,7 @@ export default function DocumentSettings({api,projects,refreshVersion}:{api:Know
  function edit(value:DocumentSource){dirty.current=true;setSource(structuredClone(value));setError('');setNotice('');}
  function change(value:Partial<DocumentSource>){dirty.current=true;setSource(prev=>prev?{...prev,...value}:null);}
  async function act(action:()=>Promise<DocumentConfigView>,success:string,saveInterval=false){setBusy(true);setError('');try{const cfg=await action();if(saveInterval)intervalDirty.current=false;accept(cfg);setNotice(success);return true;}catch(e){setError(message(e));return false;}finally{setBusy(false);}}
- async function saveSource(e:FormEvent){e.preventDefault();if(!config||!source)return;const ok=await act(()=>api.upsertSource({...source,root:source.root.trim()},config.revision),'문서 폴더를 저장했습니다.');if(ok){setSource(null);dirty.current=intervalDirty.current;}}
+ async function saveSource(e:FormEvent){e.preventDefault();if(!config||!source)return;const ok=await act(()=>api.upsertSource({...source,root:source.root.trim(),publishTargets:source.scope==='project'&&source.location==='nas'?source.publishTargets?.map(t=>({...t,path:t.path.trim()})):undefined},config.revision),'문서 폴더를 저장했습니다.');if(ok){setSource(null);dirty.current=intervalDirty.current;}}
  async function probe(id:string){setProbing(id);setError('');try{const value=await api.scan([id],true);const result=value&&typeof value==='object'&&!Array.isArray(value)&&Array.isArray(value.sources)?value.sources:[];const unsuccessful=result.some(s=>s&&typeof s==='object'&&!Array.isArray(s)&&s.state!=='online');setConnection((await api.sourceStates()).sources);setNotice(unsuccessful?'연결 상태를 확인했습니다. 마지막 정상 캐시를 유지합니다.':'문서 자료를 다시 읽었습니다.');}catch(e){setError(message(e));}finally{setProbing(null);}}
  if(!config)return <div className="knowledge-content">{error?<p role="alert" className="alert error">{error}</p>:<p role="status" className="small">문서 연결 설정을 불러오는 중입니다.</p>}</div>;
  return <div className="knowledge-content document-settings">
@@ -43,6 +43,19 @@ export default function DocumentSettings({api,projects,refreshVersion}:{api:Know
    <label className="field">문서 폴더 경로<input aria-label="문서 폴더 경로" value={source.root} required placeholder={source.location==='nas'?'\\\\server\\공유폴더\\프로젝트':'문서 폴더의 전체 경로'} onChange={e=>change({root:e.target.value})}/><small>NAS는 Windows에서 연결된 공유 폴더의 UNC 경로를 사용합니다.</small></label>
    <fieldset className="document-roles"><legend>문서 역할</legend>{roles.map(([id,label])=><label key={id}><input type="checkbox" checked={source.roles.includes(id)} onChange={e=>change({roles:e.target.checked?[...source.roles,id]:source.roles.filter(r=>r!==id)})}/>{label}</label>)}</fieldset>
    {source.location==='nas'&&<button type="button" className="text-button" onClick={()=>change({include:['일자별 작업기록','개발 진행 체크리스트','검토·검증 결과','프로젝트 개발 지침','프로젝트_문서안내.md'],roles:['dailyLog','checklist','review','reference','publicationReceipt']})}>NAS 문서 분류 제안 적용</button>}
+   {source.location==='nas'&&source.scope==='project'&&<fieldset className="publish-targets">
+    <legend>NAS 게시 문서</legend><p className="small">기존 배치표에 있는 Markdown 상대 경로를 등록해 주세요.</p>
+    {(source.publishTargets??[]).map((target,i)=><div className="publish-target" key={i}>
+      <label className="field">문서 역할<select value={target.role} onChange={e=>change({publishTargets:source.publishTargets?.map((t,index)=>index===i?{...t,role:e.target.value as PublishTarget['role']}:t)})}>
+        <option value="checklist">진행 체크리스트</option><option value="dailyLog">일자별 작업기록</option>
+        <option value="status">현재 상태</option><option value="index">문서 안내</option>
+      </select></label>
+      <label className="field">게시 상대 경로<input required value={target.path} onChange={e=>change({publishTargets:source.publishTargets?.map((t,index)=>index===i?{...t,path:e.target.value}:t)})}/></label>
+      <button type="button" className="text-button" onClick={()=>change({publishTargets:source.publishTargets?.filter((_,index)=>index!==i)})}>대상 제거</button>
+    </div>)}
+    <button type="button" className="subtle-button" disabled={(source.publishTargets?.length??0)>=12}
+      onClick={()=>change({publishTargets:[...(source.publishTargets??[]),{role:'checklist',path:''}]})}>게시 대상 추가</button>
+   </fieldset>}
    <div className="knowledge-fields"><label className="field">포함할 하위 경로<textarea rows={3} value={(source.include??[]).join('\n')} placeholder="비워 두면 모든 지원 문서" onChange={e=>change({include:e.target.value.split('\n').filter(Boolean)})}/><small>경로 접두어를 한 줄에 하나씩 입력합니다.</small></label><label className="field">제외할 하위 경로<textarea rows={3} value={(source.exclude??[]).join('\n')} onChange={e=>change({exclude:e.target.value.split('\n').filter(Boolean)})}/><small>빌드·임시 폴더와 외부 연결 폴더는 탐색에서 제외합니다.</small></label></div>
    <div className="knowledge-actions"><button type="button" className="subtle-button" onClick={()=>{setSource(null);dirty.current=intervalDirty.current;}}>문서 편집 취소</button><button className="primary-button" type="submit" disabled={busy||source.roles.length===0}>문서 폴더 저장</button></div>
   </form>}

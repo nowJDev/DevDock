@@ -32,7 +32,7 @@ pub(crate) fn capture(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let mut child = command.spawn().map_err(err)?;
+    let (mut child, _owner) = crate::child_process::spawn(&mut command).map_err(err)?;
     let stdout = child.stdout.take().ok_or("worker stdout missing")?;
     let reader = std::thread::spawn(move || {
         let mut bytes = vec![];

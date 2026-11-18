@@ -110,7 +110,7 @@ pub fn counts(basis: &Value) -> Value {
     let active: Vec<_> = tasks.iter().filter(|t| t["state"] != "cancelled").collect();
     let leaves: Vec<_> = active
         .iter()
-        .filter(|t| !active.iter().any(|child| child["parentId"] == t["taskId"]))
+        .filter(|t| !tasks.iter().any(|child| child["parentId"] == t["taskId"]))
         .collect();
     let verified = |t: &Value| {
         t["state"] == "reportedComplete"
@@ -301,7 +301,7 @@ impl KnowledgeService {
             .chain(task.source_span.clone())
             .collect();
         for span in spans {
-            let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND v.sha256=?2 AND l.project_id=?3 AND l.review_state='accepted')",params![span.version_id,span.sha256,project],|r|r.get(0)).map_err(err)?;
+            let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND v.sha256=?2 AND l.project_id=?3 AND l.review_state='accepted' AND v.kind!='generatedPublication')",params![span.version_id,span.sha256,project],|r|r.get(0)).map_err(err)?;
             if !valid {
                 return Err("foreign evidence".into());
             }
@@ -504,6 +504,22 @@ impl KnowledgeService {
             let Some(at) = state["lastSuccessAt"].as_str() else {
                 return Ok(("stale", None));
             };
+            let interval = if config["location"] == "nas" {
+                super::store::config(c)?["nasIntervalSec"]
+                    .as_i64()
+                    .unwrap_or(30)
+            } else {
+                5
+            };
+            let valid_time = chrono::DateTime::parse_from_rfc3339(at)
+                .ok()
+                .is_some_and(|time| {
+                    let age = chrono::Utc::now().signed_duration_since(time).num_seconds();
+                    (-2..=interval.saturating_mul(3).max(30)).contains(&age)
+                });
+            if !valid_time {
+                return Ok(("stale", None));
+            }
             checked.push(at.to_owned());
         }
         checked.sort();
@@ -582,7 +598,7 @@ impl KnowledgeService {
                     b["version"]
                 );
                 let point = json!({"date":date,"basisVersion":b["version"],"counts":count,"origin":"observed","coverage":"complete","sourceSpans":spans,"capturedAt":at});
-                tx.execute("INSERT INTO project_progress_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'observed',NULL,?9) ON CONFLICT(point_id) DO UPDATE SET total=excluded.total,verified=excluded.verified,reported=excluded.reported,payload=excluded.payload",params![point_id,id,b["basisId"].as_str(),b["version"].as_i64(),date,count["total"].as_i64(),count["verified"].as_i64(),count["reportedComplete"].as_i64(),point.to_string()]).map_err(err)?;
+                tx.execute("INSERT INTO project_progress_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'observed',NULL,?9) ON CONFLICT(point_id) DO UPDATE SET total=excluded.total,verified=excluded.verified,reported=excluded.reported,payload=excluded.payload WHERE julianday(json_extract(excluded.payload,'$.capturedAt'))>julianday(json_extract(project_progress_points.payload,'$.capturedAt'))",params![point_id,id,b["basisId"].as_str(),b["version"].as_i64(),date,count["total"].as_i64(),count["verified"].as_i64(),count["reportedComplete"].as_i64(),point.to_string()]).map_err(err)?;
                 tx.commit().map_err(err)?;
                 written += 1;
             }
