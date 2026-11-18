@@ -2,6 +2,7 @@
 pub mod jobs;
 pub mod models;
 pub mod parser;
+pub mod progress;
 pub mod scanner;
 pub(crate) mod store;
 use crate::service::Engine;

@@ -230,6 +230,30 @@ impl Engine {
         let entity = required(&op, "entity")?;
         let action = required(&op, "action")?;
         let value = op.get("value").cloned().unwrap_or(json!({}));
+        if matches!(entity, "task" | "status" | "evidence") {
+            let project = value["projectId"].as_str().or_else(|| {
+                reg["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t["id"] == op["id"] || t["id"] == value["taskId"])
+                    .and_then(|t| t["projectId"].as_str())
+            });
+            if let Some(project) = project {
+                let managed: bool = tx
+                    .query_row(
+                        "SELECT mode='managed' FROM project_progress_control WHERE project_id=?1",
+                        [project],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(err)?
+                    .unwrap_or(false);
+                if managed {
+                    return Err("managed project: use documents progress/task commands".into());
+                }
+            }
+        }
         if entity == "status" && action == "publish" {
             Self::validate_status(&value)?;
             let project = required(&value, "projectId")?.to_owned();
@@ -1009,6 +1033,45 @@ impl Engine {
                 continue;
             }
             let id = p["id"].as_str().unwrap_or("");
+            if self.knowledge().is_managed_project(id)? {
+                let view = self.knowledge().get_project_progress(id, None)?;
+                let mut out = p.clone();
+                for key in [
+                    "total",
+                    "verified",
+                    "reportedComplete",
+                    "inProgress",
+                    "blocked",
+                ] {
+                    out[key] = view["counts"][key].clone();
+                }
+                out["tasks"] = json!(view["basis"]["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|t| {
+                        let mut t = t.clone();
+                        t["id"] = t["taskId"].clone();
+                        t
+                    })
+                    .collect::<Vec<_>>());
+                out["trackingBasis"] = view["basis"]["name"].clone();
+                out["progressBasisId"] = view["basis"]["basisId"].clone();
+                out["progressBasisVersion"] = view["basis"]["version"].clone();
+                out["progressMode"] = json!("managed");
+                out["sourceFreshness"] = view["sourceFreshness"].clone();
+                out["sourceCapturedAt"] = view["sourceCheckedAt"].clone();
+                out["sourceErrors"] = json!([]);
+                out["currentTask"] = json!(view["basis"]["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|t| t["state"] == "inProgress")
+                    .and_then(|t| t["title"].as_str())
+                    .unwrap_or(""));
+                projects.push(out);
+                continue;
+            }
             let status = statuses.get(id);
             let registered = reg["tasks"].as_array().unwrap();
             let tombstones = registered

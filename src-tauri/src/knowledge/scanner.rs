@@ -507,7 +507,7 @@ impl KnowledgeService {
         }
         for (sid, source, f, target) in prepared {
             let path = f["path"].as_str().unwrap();
-            let normalized=path.replace('\\',"/").to_lowercase();
+            let normalized = path.replace('\\', "/").to_lowercase();
             let id: Option<String> = tx
                 .query_row(
                     "SELECT document_id FROM documents WHERE source_id=?1 AND normalized_path=?2",
@@ -543,17 +543,21 @@ impl KnowledgeService {
             if let Some(project) = source["projectId"].as_str() {
                 self.require_project(project)?;
                 tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'source','accepted')",params![id,project]).map_err(err)?;
-            } else if source["scope"]=="global" {
-                let body=fs::read_to_string(&target).map_err(err)?;
-                let reg=self.engine.registry()?;
-                let projects=super::parser::match_projects(path,&body,reg["projects"].as_array().unwrap());
-                if projects.len()==1 {tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'crossChecked','accepted')",params![id,projects[0]]).map_err(err)?;}
+            } else if source["scope"] == "global" {
+                let body = fs::read_to_string(&target).map_err(err)?;
+                let reg = self.engine.registry()?;
+                let projects =
+                    super::parser::match_projects(path, &body, reg["projects"].as_array().unwrap());
+                if projects.len() == 1 {
+                    tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'crossChecked','accepted')",params![id,projects[0]]).map_err(err)?;
+                }
             }
         }
         tx.commit().map_err(err)?;
         for s in v["sources"].as_array().unwrap() {
             self.update_source_state(s["sourceId"].as_str().unwrap(), Some(s.clone()), None)?;
         }
+        self.record_observed_progress()?;
         Ok(v)
     }
     fn update_source_state(
