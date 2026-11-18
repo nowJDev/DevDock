@@ -92,7 +92,7 @@ pub(crate) fn event(
     Ok(())
 }
 pub(crate) fn load_basis(c: &Connection, project: &str, id: &str) -> Result<Value> {
-    let (version,text):(i64,String)=c.query_row("SELECT version,payload FROM progress_bases WHERE project_id=?1 AND basis_id=?2 ORDER BY version DESC LIMIT 1",params![project,id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
+    let (version,text):(i64,String)=c.query_row("SELECT version,payload FROM progress_bases WHERE project_id=?1 AND basis_id=?2 AND COALESCE(json_extract(payload,'$.inactive'),0)=0 ORDER BY version DESC LIMIT 1",params![project,id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
     let mut basis: Value = serde_json::from_str(&text).map_err(err)?;
     let mut q = c
         .prepare("SELECT payload FROM basis_tasks WHERE basis_id=?1 AND version=?2 ORDER BY rowid")
@@ -288,7 +288,7 @@ impl KnowledgeService {
         }
         Ok(())
     }
-    fn validate_task_evidence(
+    pub(crate) fn validate_task_evidence(
         &self,
         c: &Connection,
         project: &str,

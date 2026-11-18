@@ -304,6 +304,7 @@ impl KnowledgeService {
         self.validate_job_current(&c, &job)?;
         let mut candidates = vec![];
         for input in result.candidates {
+            super::history::validate_changes(&input.kind, &input.proposed_changes)?;
             if !matches!(
                 input.kind.as_str(),
                 "workEntry"

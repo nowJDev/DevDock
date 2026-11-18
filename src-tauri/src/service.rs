@@ -711,8 +711,9 @@ impl Engine {
                 [&long_cutoff],
             )
             .map_err(err)?;
-        tx.execute("DELETE FROM daily_progress WHERE date<?1", [daily_cutoff])
+        tx.execute("DELETE FROM daily_progress WHERE date<?1", [&daily_cutoff])
             .map_err(err)?;
+        tx.execute("DELETE FROM project_progress_points WHERE origin='observed' AND batch_id IS NULL AND date<?1", [&daily_cutoff]).map_err(err)?;
         let minutes = tx
             .execute(
                 "DELETE FROM observation_minutes WHERE julianday(minute)<julianday(?1)",

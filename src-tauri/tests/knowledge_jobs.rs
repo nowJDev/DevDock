@@ -115,3 +115,16 @@ fn claim_cannot_reset_sixty_minute_total_limit() {
     c.execute("UPDATE analysis_jobs SET payload=json_set(payload,'$.firstClaimAt','2000-01-01T00:00:00Z','$.leaseExpiresAt','2000-01-01T00:00:00Z') WHERE job_id=?1",[j]).unwrap();
     assert!(k.claim_analysis_job(j, "retry").is_err());
 }
+
+#[test]
+fn unknown_nested_change_properties_are_rejected() {
+    let (_d, e, id) = fixture();
+    let k = e.knowledge();
+    let job = k
+        .create_analysis_job(json!({"projectId":"p","inputVersionIds":[id]}))
+        .unwrap();
+    let j = job["jobId"].as_str().unwrap();
+    let claim = k.claim_analysis_job(j, "codex").unwrap();
+    let doc = k.read_document_version(&id, 1, 200).unwrap();
+    assert!(k.submit_analysis_result(j,claim["leaseToken"].as_str().unwrap(),json!({"candidates":[{"kind":"workEntry","workDate":"2026-01-01","sourceSpans":[{"versionId":id,"sha256":doc["sha256"],"locator":{"lines":{"start":1,"end":2}}}],"proposedChanges":{"text":"구현","executeCommand":"forbidden"}}]})).is_err());
+}
