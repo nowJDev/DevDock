@@ -181,12 +181,23 @@ fn cache_cleanup_preserves_referenced_and_latest_versions() {
 
 #[test]
 fn cleanup_commit_failure_never_removes_cache_bytes() {
-    let (_d,e,root)=fixture();let p=Path::new(&root).join("a.md");fs::write(&p,"first").unwrap();scan(&e);
-    let old=e.knowledge().list_project_documents("p",0).unwrap()["documents"][0]["versionId"].as_str().unwrap().to_owned();
-    fs::write(&p,"second").unwrap();scan(&e);
-    let c=rusqlite::Connection::open(e.data_dir().join("devdock.sqlite3")).unwrap();
-    c.execute("UPDATE document_versions SET captured_at='2000-01-01T00:00:00Z' WHERE version_id=?1",[&old]).unwrap();
+    let (_d, e, root) = fixture();
+    let p = Path::new(&root).join("a.md");
+    fs::write(&p, "first").unwrap();
+    scan(&e);
+    let old = e.knowledge().list_project_documents("p", 0).unwrap()["documents"][0]["versionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(&p, "second").unwrap();
+    scan(&e);
+    let c = rusqlite::Connection::open(e.data_dir().join("devdock.sqlite3")).unwrap();
+    c.execute(
+        "UPDATE document_versions SET captured_at='2000-01-01T00:00:00Z' WHERE version_id=?1",
+        [&old],
+    )
+    .unwrap();
     c.execute_batch("CREATE TABLE failure_pin(id TEXT REFERENCES document_versions(version_id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER fail_cleanup AFTER DELETE ON document_versions BEGIN INSERT INTO failure_pin VALUES('missing'); END;").unwrap();
     assert!(e.knowledge().cleanup_document_cache().is_err());
-    assert!(e.knowledge().read_document_version(&old,1,1).is_ok());
+    assert!(e.knowledge().read_document_version(&old, 1, 1).is_ok());
 }

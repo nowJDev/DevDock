@@ -359,8 +359,10 @@ impl KnowledgeService {
         }
         tx.commit().map_err(err)?;
         for path in unused {
-            let p=Path::new(&path);
-            if p.parent()==Some(self.engine.data_dir().join("document-cache").as_path()) {let _=fs::remove_file(p);}
+            let p = Path::new(&path);
+            if p.parent() == Some(self.engine.data_dir().join("document-cache").as_path()) {
+                let _ = fs::remove_file(p);
+            }
         }
         Ok(json!({"removed":removed}))
     }
@@ -505,16 +507,17 @@ impl KnowledgeService {
         }
         for (sid, source, f, target) in prepared {
             let path = f["path"].as_str().unwrap();
+            let normalized=path.replace('\\',"/").to_lowercase();
             let id: Option<String> = tx
                 .query_row(
                     "SELECT document_id FROM documents WHERE source_id=?1 AND normalized_path=?2",
-                    params![sid, path],
+                    params![sid, normalized],
                     |r| r.get(0),
                 )
                 .optional()
                 .map_err(err)?;
             let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
-            tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,normalized_path) DO UPDATE SET payload=excluded.payload",params![id,sid,path,f.to_string()]).map_err(err)?;
+            tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,normalized_path) DO UPDATE SET payload=excluded.payload",params![id,sid,normalized,f.to_string()]).map_err(err)?;
             let hash = f["sha256"].as_str().unwrap();
             let kind = if path.ends_with(".json") {
                 "structured"
@@ -540,6 +543,11 @@ impl KnowledgeService {
             if let Some(project) = source["projectId"].as_str() {
                 self.require_project(project)?;
                 tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'source','accepted')",params![id,project]).map_err(err)?;
+            } else if source["scope"]=="global" {
+                let body=fs::read_to_string(&target).map_err(err)?;
+                let reg=self.engine.registry()?;
+                let projects=super::parser::match_projects(path,&body,reg["projects"].as_array().unwrap());
+                if projects.len()==1 {tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'crossChecked','accepted')",params![id,projects[0]]).map_err(err)?;}
             }
         }
         tx.commit().map_err(err)?;
@@ -610,7 +618,7 @@ impl KnowledgeService {
     pub fn list_project_documents(&self, project: &str, page: u32) -> Result<Value> {
         self.require_project(project)?;
         let c = self.db()?;
-        let mut q=c.prepare("SELECT v.version_id,v.document_id,d.source_id,d.normalized_path,v.sha256,v.bytes,v.captured_at,v.kind FROM document_versions v JOIN documents d USING(document_id) JOIN document_project_links l USING(document_id) WHERE l.project_id=?1 AND l.review_state='accepted' ORDER BY v.captured_at DESC,v.version_id LIMIT 100 OFFSET ?2").map_err(err)?;
+        let mut q=c.prepare("SELECT v.version_id,v.document_id,d.source_id,json_extract(v.payload,'$.path'),v.sha256,v.bytes,v.captured_at,v.kind FROM document_versions v JOIN documents d USING(document_id) JOIN document_project_links l USING(document_id) WHERE l.project_id=?1 AND l.review_state='accepted' ORDER BY v.captured_at DESC,v.version_id LIMIT 100 OFFSET ?2").map_err(err)?;
         let rows=q.query_map(params![project,i64::from(page)*100],|r|Ok(json!({"versionId":r.get::<_,String>(0)?,"documentId":r.get::<_,String>(1)?,"sourceId":r.get::<_,String>(2)?,"path":r.get::<_,String>(3)?,"sha256":r.get::<_,String>(4)?,"bytes":r.get::<_,i64>(5)?,"capturedAt":r.get::<_,String>(6)?,"kind":r.get::<_,String>(7)?}))).map_err(err)?.collect::<std::result::Result<Vec<_>,_>>().map_err(err)?;
         Ok(json!({"documents":rows,"page":page,"pageSize":100}))
     }
