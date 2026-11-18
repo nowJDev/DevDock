@@ -13,6 +13,9 @@ enum Command {
     GetReportProfile {
         project_id: String,
     },
+    ListReportHandoverFiles {
+        project_id: String,
+    },
     SaveReportProfile {
         profile: Value,
         expected_revision: i64,
@@ -227,6 +230,7 @@ pub fn read_only(input: &Value) -> bool {
         Some(
             "get_document_config"
                 | "get_report_profile"
+                | "list_report_handover_files"
                 | "get_document_source_states"
                 | "list_project_documents"
                 | "read_document_version"
@@ -248,6 +252,9 @@ impl KnowledgeService {
         }
         match serde_json::from_value::<Command>(input).map_err(err)? {
             Command::GetReportProfile { project_id } => self.get_report_profile(&project_id),
+            Command::ListReportHandoverFiles { project_id } => {
+                self.list_report_handover_files(&project_id)
+            }
             Command::SaveReportProfile {
                 profile,
                 expected_revision,

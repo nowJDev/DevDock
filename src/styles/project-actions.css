@@ -47,7 +47,7 @@
   flex:none;
   margin-bottom:12px;
 }
-.report-dialog > .alert,.report-dialog > .knowledge-status {
+.report-dialog > .alert {
   flex:none;
   max-height:20vh;
   overflow:auto;
@@ -78,4 +78,31 @@
   margin-top:10px;
   padding-top:12px;
   border-top:1px solid var(--border);
+}
+
+.report-document-group {
+  display:grid;
+  gap:8px;
+  min-width:0;
+}
+.report-document-group + .report-document-group {
+  margin-top:14px;
+  padding-top:12px;
+  border-top:1px solid var(--border);
+}
+.report-document-group h3,.report-document-day h4 { margin:0; }
+.report-document-group h3 { font-size:14px; }
+.report-document-day h4 {
+  font-size:12px;
+  font-variant-numeric:tabular-nums;
+  padding:4px 6px;
+  color:var(--muted);
+}
+.report-document-day .candidate-select span { min-width:0; overflow-wrap:anywhere; }
+.report-prompt { display:grid; gap:8px; }
+.report-prompt textarea {
+  box-sizing:border-box;
+  width:100%;
+  min-width:0;
+  resize:vertical;
 }

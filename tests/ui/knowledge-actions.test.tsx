@@ -6,7 +6,7 @@ import App from '../../src/App';
 import {dashboardFixture,knowledgeFixture} from './knowledge-fixture';
 
 it('opens the row report without selecting project detail and provides a NAS settings link',async()=>{
-  const execute=vi.fn(async()=>({workHeading:'샘플 프로젝트',templateMode:'default'}));
+  const execute=vi.fn(async(command:string)=>command==='list_report_handover_files'?{folders:[]}:{workHeading:'샘플 프로젝트',templateMode:'default'});
   const {api}=knowledgeFixture({execute:execute as unknown as ReturnType<typeof knowledgeFixture>['api']['execute']});
   const user=userEvent.setup();
   render(<App api={dashboardFixture()} knowledge={api}/>);

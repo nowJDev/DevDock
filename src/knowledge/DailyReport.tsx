@@ -1,194 +1,195 @@
-// 선택한 원문으로 Codex 보고를 요청하고 초안의 검토와 로컬 저장을 제공한다.
-import {useEffect,useId,useState,type FormEvent} from 'react';
+// 프로젝트 문서로 Codex에 붙여넣을 일일보고 요청문을 만든다.
+import {useEffect,useId,useMemo,useRef,useState,type FormEvent} from 'react';
+import {Copy} from 'lucide-react';
 import Dialog from '../components/Dialog';
 import type {Project} from '../contracts';
 import type {KnowledgeApi} from './api';
 import type {DocumentSource,DocumentVersion,ReportProfile} from './contracts';
 
-type Request = {requestId:string;jobId:string};
-type Grounding = {reportLine:number;sourceIndex:number;startLine:number;endLine:number;classification:string};
-type Draft = {body:string;needsMoreSources:boolean;grounding:Grounding[]};
-type Result = Request & {state:string;draft:Draft|null;sources:{path:string;sha256:string}[]};
-type Validation = {lineCount:number;issues:string[];machine:{state:string;result?:string}};
-type SavePreview = {destination:string;exists:boolean;sha256:string|null};
-type Selection = {path:string;expectedSha256?:string};
+type HandoverFolder = {
+  sourceId:string;
+  root:string;
+  files:{name:string;date:string|null}[];
+  error?:string;
+};
+type ReportFile = {path:string;name:string;root:string;date:string;handover:boolean};
 
+const unknownDate='날짜 미상';
 const errorMessage=(error:unknown)=>String(error).replace(/^Error: /,'');
-const currentDate=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul'}).format(new Date());
-const reportFiles=(documents:DocumentVersion[],sources:DocumentSource[])=>{
-  const unique=new Map<string,DocumentVersion>();
-  for(const doc of documents){
-    if(!/\.(?:md|txt)$/i.test(doc.path)||!sources.some(s=>s.sourceId===doc.sourceId&&s.enabled&&!s.archived))continue;
-    const key=doc.sourceId+'/'+doc.path.toLowerCase();
-    if(!unique.has(key))unique.set(key,doc);
+const toSlashes=(path:string)=>path.replace(/\\/g,'/');
+const fullPath=(root:string,relative:string)=>toSlashes(root).replace(/\/+$/,'')+'/'+toSlashes(relative);
+const localDate=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'});
+
+function documentDate(document:DocumentVersion) {
+  if(document.authoredDate)return document.authoredDate;
+  const name=toSlashes(document.path).split('/').at(-1)??'';
+  for(const match of name.matchAll(/(?<!\d)(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)/g)){
+    const date=[match[1],match[2],match[3]].join('-');
+    const time=new Date(date+'T00:00:00Z');
+    if(!Number.isNaN(time.getTime())&&time.toISOString().startsWith(date))return date;
   }
-  return [...unique.values()];
-};
-const fullPath=(root:string,relative:string)=>root.replace(/[\\/]+$/,'')+'/'+relative;
-const classifications:Record<string,string>={
-  design:'설계',implementation:'구현',automatedTest:'자동 검증',build:'빌드',remotePush:'원격 반영',
-  hardwareAcceptance:'실기 수락',unfinished:'미완료',other:'기타',
-};
+  const captured=new Date(document.capturedAt);
+  return Number.isNaN(captured.getTime())?unknownDate:localDate.format(captured);
+}
 
-export default function DailyReport({api,project,returnFocus,onClose,initialRequest}:{
-  api:KnowledgeApi;project:Pick<Project,'id'|'name'>;returnFocus:HTMLElement|null;onClose:()=>void;initialRequest?:Request;
-}){
-  const formId=useId();
-  const documentListId=useId();
-  const [profile,setProfile]=useState<ReportProfile|null>(null);
-  const [sources,setSources]=useState<DocumentSource[]>([]),[docs,setDocs]=useState<DocumentVersion[]>([]);
-  const [date,setDate]=useState(currentDate),[heading,setHeading]=useState('');
-  const [mode,setMode]=useState<ReportProfile['templateMode']>('default'),[custom,setCustom]=useState('');
-  const [selected,setSelected]=useState<string[]>([]),[extraPaths,setExtraPaths]=useState(''),[crossProject,setCrossProject]=useState(false);
-  const [request,setRequest]=useState<Request|undefined>(initialRequest),[result,setResult]=useState<Result|null>(null);
-  const [body,setBody]=useState(''),[checked,setChecked]=useState<Validation|null>(null);
-  const [destination,setDestination]=useState(''),[savePreview,setSavePreview]=useState<SavePreview|null>(null);
-  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
-  const [page,setPage]=useState(0),[more,setMore]=useState(false);
-  const [recent,setRecent]=useState<(Request&{state:string;createdAt:string})[]>([]);
-
-  useEffect(()=>{
-    let current=true;
-    void Promise.all([api.execute<ReportProfile>('get_report_profile',{projectId:project.id}),api.config(),api.documents(project.id)])
-      .then(([p,c,d])=>{
-        if(!current)return;
-        setProfile(p);setHeading(p.workHeading||project.name);setMode(p.templateMode);setCustom(p.customTemplate??'');
-        setSources(c.sources);setDocs(d.documents);setMore(d.documents.length===d.pageSize);
-      },e=>{if(current)setError(errorMessage(e));});
-    void api.jobs(project.id).then(({jobs})=>{
-      if(current)setRecent(jobs.filter(j=>j.kind==='dailyReport'&&j.requestId&&j.state!=='resultExpired').map(j=>({
-        requestId:j.requestId!,jobId:j.jobId,state:j.state,createdAt:j.createdAt,
-      })));
-    },()=>{});
-    return()=>{current=false;};
-  },[api,project.id,project.name]);
-  useEffect(()=>{
-    if(!request)return;
-    let current=true;
-    let timer:ReturnType<typeof setTimeout>|undefined;
-    async function load(){
-      try{
-        const response=await api.execute<Result>('get_report_draft',{requestId:request!.requestId});
-        if(!current)return;
-        setResult(response);
-        if(response.draft){setBody(response.draft.body);return;}
-        if(['resultExpired','failed','cancelled'].includes(response.state))return;
-      }catch(e){if(current)setError(errorMessage(e));}
-      if(current)timer=setTimeout(()=>void load(),5000);
+function reportFiles(documents:DocumentVersion[],sources:DocumentSource[],folders:HandoverFolder[]) {
+  const activeSources=new Map(sources.filter(s=>s.enabled&&!s.archived).map(s=>[s.sourceId,s]));
+  const liveFolders=new Set(folders.map(folder=>folder.sourceId));
+  const files=new Map<string,ReportFile>();
+  const add=(file:ReportFile)=>{
+    const key=/^(?:[a-z]:|\/\/)/i.test(file.path)?file.path.toLowerCase():file.path;
+    if(!files.has(key))files.set(key,file);
+  };
+  for(const folder of folders){
+    for(const file of folder.files){
+      add({path:fullPath(folder.root,file.name),name:file.name,root:folder.root,date:file.date??unknownDate,handover:true});
     }
-    void load();
-    return()=>{current=false;clearTimeout(timer);};
-  },[api,request]);
+  }
+  for(const doc of documents){
+    const source=activeSources.get(doc.sourceId);
+    if(!source)continue;
+    const name=toSlashes(doc.path);
+    if(liveFolders.has(doc.sourceId)&&!name.includes('/'))continue;
+    add({path:fullPath(source.root,name),name,root:source.root,date:documentDate(doc),
+      handover:liveFolders.has(doc.sourceId)||doc.kind==='handover'});
+  }
+  return [...files.values()].sort((a,b)=>Number(b.handover)-Number(a.handover)||
+    b.date.localeCompare(a.date,'en',{numeric:true})||a.name.localeCompare(b.name,'ko'));
+}
 
-  const files=reportFiles(docs,sources);
-  const typed=extraPaths.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
-  const count=selected.length+typed.length;
-  const changed=!!result?.draft&&body!==result.draft.body;
-  async function run(action:()=>Promise<void>){
-    setBusy(true);setError('');setNotice('');
-    try{await action();}catch(e){setError(errorMessage(e));}finally{setBusy(false);}
+export default function DailyReport({api,project,returnFocus,onClose}:{
+  api:KnowledgeApi;project:Pick<Project,'id'|'name'>;returnFocus:HTMLElement|null;onClose:()=>void;
+}){
+  const listId=useId();
+  const preview=useRef<HTMLTextAreaElement>(null);
+  const [files,setFiles]=useState<ReportFile[]|null>(null);
+  const [heading,setHeading]=useState(project.name),[dateFilter,setDateFilter]=useState('');
+  const [selected,setSelected]=useState<string[]>([]);
+  const [prompt,setPrompt]=useState(''),[copiedPrompt,setCopiedPrompt]=useState('');
+  const [error,setError]=useState(''),[copyError,setCopyError]=useState('');
+  const [warnings,setWarnings]=useState<string[]>([]);
+
+  useEffect(()=>{
+    let active=true;
+    async function loadDocuments(){
+      const documents:DocumentVersion[]=[];
+      for(let page=0;active;page++){
+        const result=await api.documents(project.id,page);
+        documents.push(...result.documents);
+        if(result.documents.length<result.pageSize)break;
+      }
+      return documents;
+    }
+    void Promise.all([
+      api.execute<ReportProfile>('get_report_profile',{projectId:project.id}),
+      api.config(),
+      loadDocuments(),
+      api.execute<{folders:HandoverFolder[]}>('list_report_handover_files',{projectId:project.id}),
+    ]).then(([profile,config,docs,{folders}])=>{
+      if(!active)return;
+      setHeading(profile.workHeading.trim()||project.name);
+      setFiles(reportFiles(docs,config.sources,folders));
+      setWarnings(folders.filter(folder=>folder.error).map(folder=>folder.root+' · '+folder.error));
+    }).catch(e=>{if(active)setError(errorMessage(e));});
+    return()=>{active=false;};
+  },[api,project.id,project.name]);
+
+  const dates=useMemo(()=>{
+    const unique=[...new Set(files?.map(file=>file.date))];
+    return unique.sort((a,b)=>a===unknownDate?1:b===unknownDate?-1:b.localeCompare(a));
+  },[files]);
+  const groups=useMemo(()=>{
+    const available=files?.filter(file=>!dateFilter||file.date===dateFilter)??[];
+    return [{title:'핸드오버',files:available.filter(file=>file.handover)},
+      {title:'프로젝트 문서',files:available.filter(file=>!file.handover)}].map(group=>({
+        title:group.title,
+        dates:dates.map(date=>({date,files:group.files.filter(file=>file.date===date)}))
+          .filter(bucket=>bucket.files.length>0),
+      }));
+  },[files,dateFilter,dates]);
+
+  function clearPrompt(){
+    setPrompt('');
+    setCopiedPrompt('');
+    setCopyError('');
   }
-  function create(event:FormEvent){
+  function createPrompt(event:FormEvent){
     event.preventDefault();
-    const selectedFiles:Selection[]=files.filter(d=>selected.includes(d.versionId)).map(d=>({
-      path:fullPath(sources.find(s=>s.sourceId===d.sourceId)!.root,d.path),expectedSha256:d.sha256,
-    }));
-    selectedFiles.push(...typed.map(path=>({path})));
-    void run(async()=>{
-      const next=await api.execute<Request>('create_report_request',{request:{
-        projectId:project.id,date,heading:heading.trim(),selectedFiles,templateMode:mode,
-        customTemplate:mode==='custom'?custom:null,allowCrossProject:crossProject,
-      }});
-      setDestination(profile?.localSaveDirectory?fullPath(profile.localSaveDirectory,date+' 일일보고.txt'):'');
-      setRecent(previous=>[{...next,state:'pending',createdAt:new Date().toISOString()},...previous]);
-      setRequest(next);
-    });
+    const chosen=files?.filter(file=>selected.includes(file.path))??[];
+    if(!chosen.length||!heading.trim())return;
+    const roots=[...new Set(chosen.map(file=>file.root))];
+    setPrompt([
+      '$daily-work-report',
+      '파일 위치: '+roots.join(', '),
+      '업무명: '+heading.trim(),
+      ...chosen.map(file=>'파일명: '+file.path),
+    ].join('\n'));
+    setCopiedPrompt('');
+    setCopyError('');
   }
-  function reset(){
-    setRequest(undefined);setResult(null);setBody('');setChecked(null);setSavePreview(null);setNotice('');setError('');
+  useEffect(()=>{if(prompt)preview.current?.focus();},[prompt]);
+
+  async function copy(){
+    if(!prompt)return;
+    setCopyError('');
+    try{
+      await navigator.clipboard.writeText(prompt);
+    }catch{
+      preview.current?.focus();
+      preview.current?.select();
+      if(!document.execCommand?.('copy')){
+        setCopyError('자동 복사에 실패했습니다. 선택된 요청문을 Ctrl+C로 복사해 주세요.');
+        return;
+      }
+    }
+    setCopiedPrompt(prompt);
   }
-  const handoff=request&&'DevDock 일일보고 요청 '+request.requestId+' (작업 '+request.jobId+'). devdock-cli reports context로 요청과 daily-work-report 규칙을 읽고, reports claim과 reports read-source로 선택 자료 전체를 읽어 주세요. 결과와 읽기 증명은 reports submit --stdin 으로 제출해 주세요.';
+
   return <Dialog title={'일일보고 · '+project.name} wide className="report-dialog" returnFocus={returnFocus} onClose={onClose}>
-    {error&&<p className="alert error" role="alert">{error}</p>}
-    {notice&&<p className="knowledge-status" role="status">{notice}</p>}
-    {!request&&profile&&<form id={formId} className="knowledge-content report-dialog-body" onSubmit={create}>
-      {recent.length>0&&<details className="source-path"><summary>이전 보고 요청</summary>
-        {recent.map(item=><div className="analysis-job" key={item.requestId}>
-          <span>{new Date(item.createdAt).toLocaleString('ko-KR')}<small>{item.requestId}</small></span>
-          <button className="subtle-button" type="button" disabled={busy} onClick={()=>setRequest(item)}>요청 열기</button>
-        </div>)}
-      </details>}
+    {error&&<p className="alert error" role="alert">문서를 불러오지 못했습니다. {error}</p>}
+    {!files&&!error&&<p role="status">보고에 사용할 문서를 불러오는 중입니다.</p>}
+    <form className="knowledge-content report-dialog-body" onSubmit={createPrompt}>
       <div className="knowledge-fields">
-        <label className="field">보고 날짜<input type="date" required value={date} onChange={e=>setDate(e.target.value)}/></label>
-        <label className="field">업무 헤더<input required maxLength={1024} value={heading} onChange={e=>setHeading(e.target.value)}/></label>
+        <label className="field">업무명<input required maxLength={1024} value={heading} disabled={!files} onChange={e=>{
+          setHeading(e.target.value);clearPrompt();
+        }}/></label>
+        <label className="field">문서 날짜<select value={dateFilter} onChange={e=>setDateFilter(e.target.value)} disabled={!dates.length}>
+          <option value="">전체 날짜</option>
+          {dates.map(date=><option key={date} value={date}>{date}</option>)}
+        </select></label>
       </div>
-      <label className="field">보고 양식<select value={mode} onChange={e=>setMode(e.target.value as typeof mode)}>
-        <option value="default">기본 · 10~12줄</option><option value="custom">사용자 지정</option>
-      </select></label>
-      {mode==='custom'&&<label className="field">사용자 지정 양식<textarea maxLength={12000} rows={4} value={custom} onChange={e=>setCustom(e.target.value)}/></label>}
-      <fieldset className="document-roles report-document-picker">
-        <legend id={documentListId}>보고에 사용할 문서</legend>
-        {!files.length&&<p className="small">연결한 Markdown·텍스트 문서가 없습니다.</p>}
-        {files.length>0&&<div className="report-document-list" role="region" aria-labelledby={documentListId} tabIndex={0}>
-          {files.map(d=><label className="candidate-select" key={d.versionId}>
-            <input type="checkbox" checked={selected.includes(d.versionId)} onChange={e=>{
-              setSelected(previous=>e.target.checked?[...previous,d.versionId]:previous.filter(id=>id!==d.versionId));
-            }}/><span>{d.path}</span>
-          </label>)}
+      {warnings.map(warning=><p className="warning-text source-path" key={warning}>{warning}</p>)}
+      {files&&<fieldset className="document-roles report-document-picker">
+        <legend id={listId}>보고에 사용할 문서</legend>
+        {!groups.some(group=>group.dates.length>0)&&<p className="small">표시할 문서가 없습니다.</p>}
+        {groups.some(group=>group.dates.length>0)&&<div className="report-document-list" role="region" aria-labelledby={listId} tabIndex={0}>
+          {groups.filter(group=>group.dates.length>0).map(group=><section className="report-document-group" key={group.title}>
+            <h3>{group.title}</h3>
+            {group.dates.map(bucket=><div className="report-document-day" key={bucket.date}>
+              <h4>{bucket.date}</h4>
+              {bucket.files.map(file=><label className="candidate-select" key={file.path} title={file.path}>
+                <input type="checkbox" checked={selected.includes(file.path)} onChange={e=>{
+                  const checked=e.target.checked;
+                  setSelected(previous=>checked?[...previous,file.path]:previous.filter(path=>path!==file.path));
+                  clearPrompt();
+                }}/><span>{file.name}</span>
+              </label>)}
+            </div>)}
+          </section>)}
         </div>}
-      </fieldset>
-      {more&&<button className="subtle-button" type="button" disabled={busy} onClick={()=>void run(async()=>{
-        const next=await api.documents(project.id,page+1);
-        setDocs(previous=>[...previous,...next.documents]);setPage(next.page);setMore(next.documents.length===next.pageSize);
-      })}>문서 더 보기</button>}
-      <label className="field">추가 원문 파일<textarea rows={2} placeholder="md 또는 txt 파일의 전체 경로, 한 줄에 하나" value={extraPaths} onChange={e=>setExtraPaths(e.target.value)}/></label>
-      {typed.length>0&&<label className="candidate-select"><input type="checkbox" checked={crossProject} onChange={e=>setCrossProject(e.target.checked)}/>입력한 경로에 다른 프로젝트 자료 포함 허용</label>}
-    </form>}
-    {!request&&!profile&&!error&&<p role="status">보고 설정을 불러오는 중입니다.</p>}
-    {request&&<div className="knowledge-content report-dialog-body">
-      <p className="small source-path">요청 ID <strong>{request.requestId}</strong></p>
-      {!result?.draft&&<p role="status">{result?.state==='resultExpired'?'이전 초안이 만료되었습니다.':result?.state==='claimed'?'Codex가 자료를 분석 중입니다.':result?.state==='failed'?'보고 작성에 실패했습니다.':'요청 ID를 현재 Codex에 전달해 주세요.'}</p>}
-      <div className="knowledge-actions">
-        <button className="subtle-button" onClick={()=>void run(async()=>{await navigator.clipboard.writeText(handoff??'');setNotice('Codex 전달 안내를 복사했습니다.');})}>Codex 전달 안내 복사</button>
-        <button className="subtle-button" disabled={busy} onClick={reset}>새 보고 요청</button>
+      </fieldset>}
+      <div className="knowledge-actions report-request-actions">
+        <span className="small">선택 {selected.length}개</span>
+        <button className="primary-button" type="submit" disabled={!selected.length||!heading.trim()}>Codex 보고 요청</button>
       </div>
-      {result?.draft&&<>
-        {result.draft.needsMoreSources&&<p className="warning-text">선택한 근거가 부족합니다.</p>}
-        <label className="field">보고서 본문<textarea rows={11} value={body} onChange={e=>{
-          setBody(e.target.value);setChecked(null);setSavePreview(null);
-        }} disabled={busy}/></label>
-        <details className="source-path"><summary>Codex 초안 근거 {result.draft.grounding.length}개</summary>
-          {changed&&<p>편집 전 초안의 행 번호입니다.</p>}
-          {result.draft.grounding.map((g,i)=><p key={i}>
-            초안 {g.reportLine}행 · {classifications[g.classification]??g.classification} · {result.sources[g.sourceIndex]?.path} {g.startLine}~{g.endLine}행
-          </p>)}
-        </details>
+      {prompt&&<section className="report-prompt">
+        <label className="field">Codex 요청문<textarea ref={preview} readOnly rows={Math.min(prompt.split('\n').length,7)} value={prompt}/></label>
         <div className="knowledge-actions">
-          <button className="subtle-button" disabled={busy||!body.trim()} onClick={()=>void run(async()=>setChecked(await api.execute('validate_report_draft',{requestId:request.requestId,body})))}>형식 검사</button>
-          <button className="subtle-button" disabled={busy||!body.trim()} onClick={()=>void run(async()=>{await navigator.clipboard.writeText(body);setNotice('보고서 본문을 복사했습니다.');})}>본문 복사</button>
+          {copiedPrompt===prompt&&<span className="small" role="status">요청문을 복사했습니다.</span>}
+          <button className="subtle-button" type="button" onClick={()=>void copy()}><Copy size={15} aria-hidden="true"/>복사</button>
         </div>
-        {checked&&<div role="status" className="source-path">
-          <p>{checked.lineCount}줄 · {checked.machine.state==='passed'?'기계 검사 통과':checked.machine.state==='failed'?'기계 검사에서 수정 사항 발견':'선택 검사기를 사용할 수 없습니다.'} · 내용과 원문은 직접 대조해 주세요.</p>
-          {checked.issues.map(issue=><p className="warning-text" key={issue}>{issue}</p>)}
-          {checked.machine.state==='failed'&&checked.machine.result&&<pre className="document-reader">{checked.machine.result}</pre>}
-        </div>}
-        <form onSubmit={e=>{e.preventDefault();void run(async()=>{
-          if(!savePreview){setSavePreview(await api.execute('preview_report_save',{requestId:request.requestId,destination:destination.trim()}));return;}
-          await api.execute('save_report_draft',{requestId:request.requestId,body,destination:savePreview.destination,
-            expectedSha256:savePreview.sha256,overwrite:savePreview.exists});
-          setSavePreview(null);setNotice('보고서를 로컬 파일로 저장했습니다.');
-        });}}>
-          <label className="field">로컬 저장 파일 경로<input required value={destination} onChange={e=>{setDestination(e.target.value);setSavePreview(null);}}/></label>
-          {savePreview&&<p className="source-path small">{savePreview.exists?'아래 파일을 덮어씁니다.':'아래 위치에 새 파일을 만듭니다.'} {savePreview.destination}</p>}
-          <div className="knowledge-actions">{savePreview&&<button type="button" className="subtle-button" onClick={()=>setSavePreview(null)}>취소</button>}
-            <button className="primary-button" disabled={busy||!destination.trim()||!body.trim()}>{!savePreview?'저장 위치 확인':savePreview.exists?'덮어쓰기 확인':'로컬 파일 저장'}</button>
-          </div>
-        </form>
-      </>}
-    </div>}
-    {!request&&profile&&<footer className="knowledge-actions report-request-actions">
-      <span className="small">선택 {count}개 / 최대 16개</span>
-      <button className="primary-button" type="submit" form={formId} disabled={busy||count<1||count>16}>Codex 보고 요청</button>
-    </footer>}
+        {copyError&&<p className="alert error" role="alert">{copyError}</p>}
+      </section>}
+    </form>
   </Dialog>;
 }

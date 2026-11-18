@@ -9,6 +9,7 @@ pub mod progress;
 pub mod publish_files;
 pub mod publisher;
 pub mod report_ipc;
+mod report_picker;
 pub mod report_worker;
 pub mod reports;
 pub mod scanner;
