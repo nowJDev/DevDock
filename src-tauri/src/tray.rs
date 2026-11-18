@@ -3,7 +3,7 @@ use devdock_core::runtime::desktop::Runtime;
 use std::sync::atomic::Ordering;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 fn show(app: &AppHandle) {
@@ -12,6 +12,13 @@ fn show(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+fn restore_on_event(event: &TrayIconEvent) -> bool {
+    matches!(event, TrayIconEvent::Click {
+        button: MouseButton::Left,
+        button_state: MouseButtonState::Up,
+        ..
+    })
 }
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "열기", true, None::<&str>)?;
@@ -22,6 +29,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id("devdock")
         .tooltip("DevDock · A/B 상태 확인 중")
         .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if restore_on_event(&event) {
+                show(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show(app),
             "settings" => {
@@ -50,4 +63,44 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+
+    fn click(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: "devdock".into(),
+            position: tauri::PhysicalPosition::new(1.0, 2.0),
+            rect: tauri::Rect {
+                position: tauri::PhysicalPosition::new(0, 0).into(),
+                size: tauri::PhysicalSize::new(16, 16).into(),
+            },
+            button,
+            button_state,
+        }
+    }
+
+    #[test]
+    fn left_release_restores_once() {
+        assert!(restore_on_event(&click(MouseButton::Left, MouseButtonState::Up)));
+        assert!(!restore_on_event(&click(MouseButton::Left, MouseButtonState::Down)));
+    }
+
+    #[test]
+    fn right_and_down_do_not_restore() {
+        assert!(!restore_on_event(&click(MouseButton::Right, MouseButtonState::Up)));
+        assert!(!restore_on_event(&click(MouseButton::Middle, MouseButtonState::Up)));
+        assert!(!restore_on_event(&TrayIconEvent::DoubleClick {
+            id: "devdock".into(),
+            position: tauri::PhysicalPosition::new(1.0, 2.0),
+            rect: tauri::Rect {
+                position: tauri::PhysicalPosition::new(0, 0).into(),
+                size: tauri::PhysicalSize::new(16, 16).into(),
+            },
+            button: MouseButton::Left,
+        }));
+    }
 }
