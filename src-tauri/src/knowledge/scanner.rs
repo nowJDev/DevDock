@@ -318,6 +318,35 @@ fn acquire(data: &Path, location: &str) -> Result<ScanLock> {
     Ok(ScanLock { path, token })
 }
 impl KnowledgeService {
+    pub fn list_unlinked_documents(&self, page: u32) -> Result<Value> {
+        let c = self.db()?;
+        let mut q=c.prepare("SELECT v.version_id,v.document_id,d.source_id,json_extract(v.payload,'$.path'),v.sha256,v.bytes,v.captured_at,v.kind FROM document_versions v JOIN documents d USING(document_id) JOIN document_sources s USING(source_id) WHERE json_extract(s.payload,'$.scope')='global' AND json_extract(s.payload,'$.archived') IS NOT 1 AND v.sha256=json_extract(d.payload,'$.sha256') AND NOT EXISTS(SELECT 1 FROM document_project_links l WHERE l.document_id=d.document_id AND l.review_state='accepted') ORDER BY v.captured_at DESC LIMIT 100 OFFSET ?1").map_err(err)?;
+        let rows=q.query_map([i64::from(page)*100],|r|Ok(json!({"versionId":r.get::<_,String>(0)?,"documentId":r.get::<_,String>(1)?,"sourceId":r.get::<_,String>(2)?,"path":r.get::<_,String>(3)?,"sha256":r.get::<_,String>(4)?,"bytes":r.get::<_,i64>(5)?,"capturedAt":r.get::<_,String>(6)?,"kind":r.get::<_,String>(7)?}))).map_err(err)?.collect::<std::result::Result<Vec<_>,_>>().map_err(err)?;
+        Ok(json!({"documents":rows,"page":page,"pageSize":100}))
+    }
+    pub fn set_document_project_link(
+        &self,
+        project: &str,
+        document: &str,
+        linked: bool,
+        expected: i64,
+    ) -> Result<Value> {
+        let mut c = self.db()?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(err)?;
+        self.require_project(project)?;
+        let source:String=tx.query_row("SELECT s.payload FROM document_sources s JOIN documents d USING(source_id) WHERE document_id=?1",[document],|r|r.get(0)).map_err(err)?;
+        let source: Value = serde_json::from_str(&source).map_err(err)?;
+        if source["scope"] == "project" && source["projectId"] != project {
+            return Err("document belongs to another project source".into());
+        }
+        super::jobs::control(&tx, project)?;
+        super::progress::bump(&tx, project, expected)?;
+        tx.execute("INSERT INTO document_project_links VALUES(?1,?2,'manual',?3) ON CONFLICT(document_id,project_id) DO UPDATE SET method='manual',review_state=excluded.review_state",params![document,project,if linked{"accepted"}else{"rejected"}]).map_err(err)?;
+        tx.commit().map_err(err)?;
+        self.get_project_progress(project, None)
+    }
     pub fn pin_document_version(&self, id: &str, owner: &str) -> Result<()> {
         self.db()?
             .execute(

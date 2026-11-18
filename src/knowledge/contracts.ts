@@ -1,6 +1,6 @@
 // 프로젝트 문서·진행 기준·근거와 반영 이력의 화면 계약을 정의한다.
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export const knowledgeReadCommands = new Set(['get_document_config','get_document_source_states','list_project_documents','read_document_version','get_analysis_job','list_analysis_jobs','get_import_preview','list_import_batches','get_project_progress','get_project_history','preview_legacy_archive']);
+export const knowledgeReadCommands = new Set(['get_document_config','get_document_source_states','list_unlinked_documents','list_project_documents','read_document_version','get_analysis_job','list_analysis_jobs','get_import_preview','list_import_batches','get_project_progress','get_project_history','preview_legacy_archive']);
 export interface DocumentSource {
   sourceId: string; scope: 'global' | 'project'; projectId?: string | null;
   location: 'local' | 'nas'; root: string; roles: string[]; enabled: boolean;

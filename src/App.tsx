@@ -1,11 +1,13 @@
 // 데몬·프로젝트·차트·근태를 구분한 모던 다크 대시보드를 제공합니다.
-import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState,type FormEvent,type ReactNode} from 'react';
+import {useCallback,useEffect,useMemo,useRef,useState,type FormEvent} from 'react';
 import {Activity,ArrowDownRight,ArrowUpRight,Check,CheckCheck,ChevronRight,Clock3,Code2,Database,FolderKanban,LayoutDashboard,Loader2,MonitorDot,Plus,RefreshCw,Search,Settings2,ShieldCheck,Trash2,X} from 'lucide-react';
 import type {Api,AttendanceRun,Daemon,Monitor,Project,ProjectProgress,Registry,Settings,Snapshot,History} from './contracts';
 import {api as defaultApi} from './api';
 import DailyProgressChart from './components/charts/DailyProgressChart';
 import ProgressChart from './components/charts/ProgressChart';
 import DocumentSettings from './knowledge/DocumentSettings';
+import ProjectKnowledge from './knowledge/ProjectKnowledge';
+import Modal from './components/Dialog';
 import {knowledgeApi as defaultKnowledge,type KnowledgeApi} from './knowledge/api';
 type Page='overview'|'projects'|'monitors'|'activity'|'settings';
 const pages:{id:Page;label:string;icon:typeof Activity}[]=[{id:'overview',label:'개요',icon:LayoutDashboard},{id:'projects',label:'프로젝트',icon:FolderKanban},{id:'monitors',label:'모니터링',icon:MonitorDot},{id:'activity',label:'활동 이력',icon:Activity},{id:'settings',label:'설정',icon:Settings2}];
@@ -25,7 +27,7 @@ function capturedAt(value:string){
 const errorMessage=(error:unknown)=>String(error).replace(/^Error: /,'');
 
 type HistoryResult={projectId:string;hours:number}&({state:'ready';history:History}|{state:'error';message:string});
-function useProjectHistory(api:Api,projectId:string|undefined,hours:number,snapshotVersion:number){
+function useProjectHistory(api:Api,projectId:string|undefined,hours:number,refreshVersion:number){
  const [result,setResult]=useState<HistoryResult|null>(null);
  const [attempt,retry]=useState(0);
  const refresh=useRef<(()=>void)|null>(null);
@@ -48,39 +50,12 @@ function useProjectHistory(api:Api,projectId:string|undefined,hours:number,snaps
   refresh.current=read;
   return()=>{current=false;refresh.current=null;};
  },[api,projectId,hours,attempt]);
- useEffect(()=>{refresh.current?.();},[api,projectId,hours,attempt,snapshotVersion]);
+ useEffect(()=>{refresh.current?.();},[api,projectId,hours,attempt,refreshVersion]);
  const matchingResult=result?.projectId===projectId&&result?.hours===hours?result:null;
  return {result:matchingResult,retry:()=>{setResult(null);retry(n=>n+1);}};
 }
 function HistoryError({message,onRetry}:{message:string;onRetry:()=>void}){
  return <div className="history-error"><p role="alert">진행 이력을 불러오지 못했습니다. {message}</p><button className="subtle-button" onClick={onRetry}>다시 조회</button></div>;
-}
-function Modal({title,children,onClose,returnFocus}:{title:string;children:ReactNode;onClose:()=>void;returnFocus:HTMLElement|null}){
- const ref=useRef<HTMLDivElement>(null);
- const closeRef=useRef(onClose);closeRef.current=onClose;
- useLayoutEffect(()=>{
-  const dialog=ref.current;
-  const handle=(e:KeyboardEvent)=>{
-   if(dialog!==document.querySelector('.modal-shade:last-child [role="dialog"]'))return;
-   if(e.key==='Escape'){e.preventDefault();closeRef.current();return;}
-   if(e.key!=='Tab'||!dialog)return;
-   const elements=dialog.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]');
-   if(!elements.length)return;
-   const first=elements[0],last=elements[elements.length-1];
-   if(e.shiftKey&&(document.activeElement===first||!dialog.contains(document.activeElement))){e.preventDefault();last.focus();}
-   else if(!e.shiftKey&&(document.activeElement===last||!dialog.contains(document.activeElement))){e.preventDefault();first.focus();}
-  };
-  document.addEventListener('keydown',handle);
-  return()=>{
-   document.removeEventListener('keydown',handle);
-   queueMicrotask(()=>{
-    if(dialog?.isConnected||!returnFocus?.isConnected)return;
-    const openDialog=document.querySelector('.modal-shade:last-child [role="dialog"]');
-    if(!openDialog||openDialog.contains(returnFocus))returnFocus.focus();
-   });
-  };
- },[returnFocus]);
- return <div className="modal-shade"><div ref={ref} className="modal" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-button" aria-label="닫기" onClick={onClose}><X size={18}/></button></header>{children}</div></div>;
 }
 function DaemonCard({daemon}:{daemon:Daemon}){
  const fresh=!daemon.freshness||daemon.freshness==='fresh';
@@ -153,6 +128,7 @@ const monitorStates:Record<string,{label:string;tone:string}>={
 export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Api;knowledge?:KnowledgeApi}){
  const [page,setPage]=useState<Page>('overview');const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [registry,setRegistry]=useState<Registry|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const [subscriptionError,setSubscriptionError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('');const [selected,setSelected]=useState<ProjectProgress|null>(null);const [form,setForm]=useState<'project'|'monitor'|null>(null);const [remove,setRemove]=useState<{entity:'project'|'monitor';item:Project|Monitor}|null>(null);const [editing,setEditing]=useState<Project|Monitor|null>(null);const [checkout,setCheckout]=useState<{date:string;returnFocus:HTMLElement|null}|null>(null);const [baseRevision,setBaseRevision]=useState<number|undefined>();const [monitorKind,setMonitorKind]=useState('checklist');const settingsDirty=useRef(false);const [settings,setSettings]=useState<Settings|null>(null);const declineRef=useRef<HTMLButtonElement>(null);
  const [documentsOpen,setDocumentsOpen]=useState(false);
+ const [chartRefresh,setChartRefresh]=useState(0);
  const [days,setDays]=useState<7|30>(7);
  const [dailyProjectId,setDailyProjectId]=useState<string>();
  const [snapshotVersion,setSnapshotVersion]=useState(0);
@@ -200,13 +176,15 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   return()=>{active=false;loadGeneration.current++;dashboardLoad.current=null;clearInterval(timer);cleanup.splice(0).forEach(fn=>fn());};
  },[api,load]);
  useEffect(()=>{if(checkout)declineRef.current?.focus();},[checkout]);
- const dailyHistory=useProjectHistory(api,page==='overview'?dailyProjectId:undefined,days*24,snapshotVersion);
- const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,snapshotVersion);
+ const dailyHistory=useProjectHistory(api,page==='overview'?dailyProjectId:undefined,days*24,chartRefresh);
+ const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,chartRefresh);
  async function perform(action:()=>Promise<unknown>,message?:string){setBusy(true);setError('');try{await action();if(message)setNotice(message);await load(true);return true;}catch(e){setError(String(e).replace(/^Error: /,''));return false;}finally{setBusy(false);}}
  async function answer(answer:boolean){if(!checkout)return;const date=checkout.date;await perform(async()=>{const result=await api.answerCheckout(answer,date);setCheckout(null);if(result.attendanceError){setNotice('');setError('퇴근 실행 실패: '+result.attendanceError);return;}setNotice(result.expired?`${date} 퇴근 확인이 만료되어 실행되지 않았습니다.`:answer?'퇴근 실행 결과를 확인해 주세요.':`${date} 퇴근 알림을 거절했습니다.`);});}
  const projects=useMemo(()=>snapshot?.projects.filter(p=>!p.archived&&p.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))??[],[snapshot,filter]);
  const activeProjects=snapshot?.projects.filter(p=>!p.archived)??[];const monitors=registry?.monitors.filter(m=>!m.archived)??[];
  const dailyProject=activeProjects.find(p=>p.id===dailyProjectId);
+ // 일별 차트의 날짜 축도 수동 조회와 선택 변경 시점에 고정합니다.
+ const chartToday=useMemo(()=>localDate(snapshot?.now??new Date().toISOString()),[dailyProjectId,days,chartRefresh]);
  const dailyData=dailyHistory.result?.state==='ready'?dailyHistory.result.history.dailyProgress:undefined;
  const dailyPoints=useMemo(()=>dailyData?.filter(p=>p.projectId===dailyProjectId)??[],[dailyData,dailyProjectId]);
  const projectHistory=detailHistory.result?.state==='ready'?detailHistory.result.history.progress:undefined;
@@ -215,7 +193,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  async function submitForm(e:FormEvent<HTMLFormElement>){e.preventDefault();const data=new FormData(e.currentTarget);const id=editing?.id??crypto.randomUUID();const project=form==='project';const value=project?{...editing,id,name:String(data.get('name')),root:String(data.get('root')),checklistPath:String(data.get('checklistPath')||'')}:{...editing,id,name:String(data.get('name')),kind:String(data.get('kind')),source:String(data.get('source')),projectId:String(data.get('projectId')||''),enabled:editing&&'enabled' in editing?editing.enabled:true};const ok=await perform(()=>api.mutate({entity:project?'project':'monitor',action:'upsert',value},baseRevision),'등록했습니다.');if(ok){setForm(null);setEditing(null);}}
  async function save(e:FormEvent){e.preventDefault();if(!settings)return;const valid=/^([01]\d|2[0-3]):[0-5]\d$/;if(!valid.test(settings.startTime)||!valid.test(settings.endTime)||!valid.test(settings.checkoutTime)||settings.startTime>=settings.endTime){setError('올바른 시간과 출근 시간대의 시작·종료 순서를 확인해 주세요.');return;}await perform(async()=>{const result=await api.saveSettings(settings);settingsDirty.current=false;return result;},'설정을 저장했습니다.');}
  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Code2 size={23}/></div><span>DevDock</span></div><nav aria-label="주요 탐색">{pages.map(p=><button key={p.id} aria-current={page===p.id?'page':undefined} className={page===p.id?'selected':''} onClick={()=>{setPage(p.id);setSelected(null);setFilter('');}}><p.icon size={18}/><span>{p.label}</span>{p.id==='projects'&&<small>{activeProjects.length}</small>}</button>)}</nav><div className="sidebar-bottom"><div className="local-tag"><span className="local-dot"/>로컬 워크스페이스</div><div className="version">DevDock <span>v0.1.0</span></div></div></aside>
- <div className="main-shell"><header className="topbar"><div className="breadcrumb">워크스페이스 <ChevronRight size={13}/><strong>{title}</strong></div><div className="topbar-actions"><span className="sync"><i/>{snapshot?'화면 갱신 '+time(snapshot.now):'연결 확인 중'}</span><button className="icon-button" aria-label="지금 확인" disabled={busy} onClick={()=>void perform(()=>api.refresh())}><RefreshCw size={16} className={busy?'spin':''}/></button><div className="profile">D</div></div></header>
+ <div className="main-shell"><header className="topbar"><div className="breadcrumb">워크스페이스 <ChevronRight size={13}/><strong>{title}</strong></div><div className="topbar-actions"><span className="sync"><i/>{snapshot?'화면 갱신 '+time(snapshot.now):'연결 확인 중'}</span><button className="icon-button" aria-label="지금 확인" disabled={busy} onClick={()=>void perform(async()=>{await api.refresh();setChartRefresh(n=>n+1);})}><RefreshCw size={16} className={busy?'spin':''}/></button><div className="profile">D</div></div></header>
  <main><div className="page-heading"><div><div className="eyebrow">{new Date(snapshot?.now??Date.now()).toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'})}</div><h1>{page==='overview'?'워크스페이스 개요':title}</h1><p>{page==='overview'?'프로젝트의 흐름과 지금 필요한 확인을 한곳에서 살펴보세요.':page==='projects'?'현재 작업과 검증 근거를 구분해 진행상황을 확인합니다.':page==='monitors'?'프로젝트에 필요한 관측 항목을 연결하고 관리합니다.':page==='activity'?'실제로 관측한 작업과 상태 변경을 시간순으로 확인합니다.':'자동화 시간과 로컬 연결을 관리합니다.'}</p></div>{(page==='overview'||page==='projects'||page==='monitors')&&<button className="primary-button" onClick={e=>{mutationTrigger.current=e.currentTarget;setBaseRevision(registry?.revision);setEditing(null);setMonitorKind('checklist');setForm(page==='monitors'?'monitor':'project');}}><Plus size={16}/>{page==='monitors'?'항목 추가':'프로젝트 연결'}</button>}</div>
  {snapshot?.verificationMode&&<div className="alert notice" role="status">검증 모드입니다. 실제 근태와 자동 시작 설정을 변경하지 않습니다.</div>}
  {subscriptionError&&<div className="alert error" role="alert">{subscriptionError}</div>}
@@ -232,19 +210,20 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   </div>
   <section className="panel daily-panel" aria-labelledby="daily-title">
    <div className="section-heading">
-    <div><h2 id="daily-title">프로젝트 일별 진행현황</h2><p>각 날짜에 수집한 마지막 작업 개수를 표시합니다.</p></div>
+    <div><h2 id="daily-title">프로젝트 일별 진행현황</h2><p>각 날짜의 마지막 작업 개수입니다. 새로고침할 때 갱신합니다.</p></div>
     {dailyProject&&<div className="daily-controls">
      <select aria-label="진행현황 프로젝트" value={dailyProjectId} onChange={e=>setDailyProjectId(e.target.value)}>
       {activeProjects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
      </select>
      <select aria-label="진행현황 기간" value={days} onChange={e=>setDays(e.target.value==='30'?30:7)}><option value={7}>최근 7일</option><option value={30}>최근 30일</option></select>
+     <button type="button" className="subtle-button" aria-label="일별 차트 새로고침" onClick={()=>setChartRefresh(n=>n+1)}><RefreshCw size={14}/>새로고침</button>
     </div>}
    </div>
    {dailyProject?<div className="daily-panel-content">
     <h3 className="daily-selected">{dailyProject.name}</h3>
     <ProjectSource project={dailyProject} current/>
     {dailyHistory.result?.state==='error'?<HistoryError message={dailyHistory.result.message} onRetry={dailyHistory.retry}/>
-     :dailyHistory.result?.state==='ready'?<DailyProgressChart key={dailyProject.id} points={dailyPoints} days={days} today={localDate(snapshot.now)} projectName={dailyProject.name}/>
+     :dailyHistory.result?.state==='ready'?<DailyProgressChart key={dailyProject.id} points={dailyPoints} days={days} today={chartToday} projectName={dailyProject.name}/>
      :<p className="history-pending" role="status">일별 진행 기록을 불러오는 중입니다.</p>}
    </div>:<div className="empty-project"><FolderKanban size={24}/><h3>연결된 프로젝트가 없습니다.</h3><p>프로젝트를 연결하면 일별 진행 기록을 볼 수 있습니다.</p></div>}
   </section>
@@ -270,7 +249,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      <button className="icon-button" aria-label="상세 닫기" onClick={()=>setSelected(null)}><X size={17}/></button>
     </div>
    </div>
-   <div className="detail-summary"><span>전체 {selected.total}개</span><span className={selected.verified?'good-text':undefined}>검증 완료 {selected.verified}</span><span>완료 보고 {selected.reportedComplete}</span><span>막힘 {selected.blocked}</span></div>
+   <ProjectKnowledge key={selected.id} api={knowledge} project={selected} refreshVersion={snapshotVersion}><div className="detail-summary"><span>전체 {selected.total}개</span><span className={selected.verified?'good-text':undefined}>검증 완료 {selected.verified}</span><span>완료 보고 {selected.reportedComplete}</span><span>막힘 {selected.blocked}</span></div>
    <div className="detail-source"><ProjectSource project={selected}/></div>
    {selected.tasks.length?<ul className="task-list">{selected.tasks.map(t=><li key={t.id}><span className={'task-dot '+t.state}/><span>{t.title}</span><small>{t.verified?'검증 완료':taskLabels[t.state]??t.state}{t.verificationEvidence?.map(e=><span key={e.id}> · {e.kind} · {e.reference} · {e.success?'성공':'실패'} · {e.subjectRevision} · {e.verifiedAt}</span>)}</small></li>)}</ul>:<p className="empty-copy">연결된 상세 작업 목록이 없습니다.</p>}
    <h3 className="detail-subheading">프로젝트 진행 추이</h3>
@@ -279,7 +258,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
     :progressHistory.length?<><div className="detail-summary"><span>전체 작업 {progressHistory[progressHistory.length-1].total}</span><span>검증 완료 {progressHistory[progressHistory.length-1].verified}</span><span>완료 보고 {progressHistory[progressHistory.length-1].reportedComplete}</span></div><ProgressChart points={progressHistory}/>{progressHistory.some((p,i)=>i>0&&p.total!==progressHistory[i-1].total)&&<p className="empty-copy">전체 작업 수 변경: {progressHistory.filter((p,i)=>i>0&&p.total!==progressHistory[i-1].total).map(p=>`${time(p.at)} (${p.total}개)`).join(' · ')}</p>}<p className="empty-copy">변경이 기록된 시점만 표시합니다. 수치는 비율이 아닌 작업 개수입니다.</p></>
     :<p className="empty-copy">프로젝트 진행 이력이 아직 없습니다.</p>}
    <h3 className="detail-subheading">현재 Codex 계획</h3>{snapshot.daemons.some(d=>d.plan?.length)?snapshot.daemons.filter(d=>d.plan?.length).map(d=><div key={d.id}><span className="small">{d.name} · 프로젝트 연결 근거를 별도로 확인하세요.</span><ul className="task-list">{d.plan.map((p,i)=><li key={i}><span className={'task-dot '+p.status}/><span>{p.step}</span><small>{taskLabels[p.status]??p.status}</small></li>)}</ul></div>):<p className="empty-copy">관측된 현재 요청의 계획이 없습니다.</p>}
-  </section>}
+  </ProjectKnowledge></section>}
  </>}
  {page==='monitors'&&registry&&<section className="panel">
   <div className="section-heading"><div><h2>등록한 모니터 <span className="count">{monitors.length}</span></h2><p>항목 제거는 원본 프로젝트나 세션을 삭제하지 않습니다.</p></div></div>

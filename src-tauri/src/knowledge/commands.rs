@@ -24,6 +24,16 @@ enum Command {
         expected_revision: u64,
     },
     GetDocumentSourceStates {},
+    ListUnlinkedDocuments {
+        #[serde(default)]
+        page: u32,
+    },
+    SetDocumentProjectLink {
+        project_id: String,
+        document_id: String,
+        linked: bool,
+        expected_project_revision: i64,
+    },
     ScanDocumentSources {
         #[serde(default)]
         source_ids: Vec<String>,
@@ -149,6 +159,7 @@ pub fn read_only(input: &Value) -> bool {
                 | "get_project_progress"
                 | "get_project_history"
                 | "preview_legacy_archive"
+                | "list_unlinked_documents"
         )
     )
 }
@@ -172,6 +183,18 @@ impl KnowledgeService {
                 expected_revision,
             } => self.archive_document_source(&source_id, expected_revision),
             Command::GetDocumentSourceStates {} => self.source_states(),
+            Command::ListUnlinkedDocuments { page } => self.list_unlinked_documents(page),
+            Command::SetDocumentProjectLink {
+                project_id,
+                document_id,
+                linked,
+                expected_project_revision,
+            } => self.set_document_project_link(
+                &project_id,
+                &document_id,
+                linked,
+                expected_project_revision,
+            ),
             Command::ScanDocumentSources { source_ids, force } => {
                 self.scan_document_sources(&source_ids, force)
             }
@@ -298,6 +321,8 @@ pub fn cli_request(args: &[String]) -> Result<Option<(Value, bool)>> {
         ("documents", "states") => "get_document_source_states",
         ("documents", "scan") => "scan_document_sources",
         ("documents", "list") => "list_project_documents",
+        ("documents", "unlinked") => "list_unlinked_documents",
+        ("documents", "link") => "set_document_project_link",
         ("documents", "read") => "read_document_version",
         ("analysis", "create") => "create_analysis_job",
         ("analysis", "get") => "get_analysis_job",

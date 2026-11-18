@@ -85,7 +85,7 @@ describe('DevDock dashboard',()=>{
   expect(api.history).toHaveBeenCalledTimes(2);
  });
 
- it('replaces daily data when an update arrives during a pending history read',async()=>{
+ it('keeps daily data until manual refresh despite background updates',async()=>{
   const {api,snapshot,listeners}=fixture();
   snapshot.now=new Date(2026,10,17,0,15).toISOString();
   Object.assign(snapshot.projects[0],{trackingBasis:'결제 회귀 검증 체크리스트',sourceCapturedAt:'2026-11-16T07:00:00Z'});
@@ -100,6 +100,9 @@ describe('DevDock dashboard',()=>{
   await act(async()=>{resolveOld(history(999));});
   await user.click(await panel.findByText(/일별 데이터 표/));
   const table=within(panel.getByRole('table'));
+  expect(table.getByRole('cell',{name:'999'})).toBeInTheDocument();
+  await user.click(panel.getByRole('button',{name:'일별 차트 새로고침'}));
+  await waitFor(()=>expect(table.getByRole('cell',{name:'13'})).toBeInTheDocument());
   expect(table.getByRole('cell',{name:'13'})).toBeInTheDocument();
   expect(panel.getByText('결제 회귀 검증 체크리스트')).toBeInTheDocument();
   expect(panel.getByText('현재 집계 기준')).toBeInTheDocument();
@@ -283,7 +286,7 @@ describe('DevDock dashboard',()=>{
  it('keeps the checkout prompt date when the snapshot date changes',async()=>{const {api,snapshot,listeners}=fixture();const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');listeners.get('checkout-prompt')!({date:'2026-11-17'});expect(await screen.findByText(/2026-11-17.*퇴근/)).toBeInTheDocument();snapshot.attendance.date='2026-11-18';listeners.get('dashboard-updated')!(null);await user.click(screen.getByRole('button',{name:'오늘은 안 함'}));await waitFor(()=>expect(api.answerCheckout).toHaveBeenCalledWith(false,'2026-11-17'));});
 
  it('retains edit input and base revision after registry changes',async()=>{const {api,listeners,changeRegistry}=fixture();const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getByRole('button',{name:/^프로젝트 1/}));await user.click(screen.getByRole('button',{name:/DevDock/}));await user.click(screen.getByRole('button',{name:'프로젝트 수정'}));const name=screen.getByLabelText('이름');await user.clear(name);await user.type(name,'작성 중');changeRegistry();listeners.get('dashboard-updated')!(null);await waitFor(()=>expect(api.registry).toHaveBeenCalledTimes(2));await user.click(screen.getByRole('button',{name:'저장'}));expect(await screen.findByRole('alert')).toHaveTextContent(/충돌|conflict/);expect(screen.getByLabelText('이름')).toHaveValue('작성 중');await act(async()=>{listeners.get('dashboard-updated')!(null);});expect(screen.getByRole('alert')).toHaveTextContent(/conflict/);expect(screen.getByLabelText('이름')).toHaveValue('작성 중');});
- it('refreshes history after five seconds while retaining an open form and save error',async()=>{
+ it('polls runtime without refreshing charts while retaining an open form and save error',async()=>{
   const {api}=fixture();
   vi.mocked(api.mutate).mockRejectedValueOnce(new Error('등록할 수 없습니다.'));
   vi.useFakeTimers();
@@ -296,7 +299,8 @@ describe('DevDock dashboard',()=>{
    await act(async()=>{fireEvent.click(within(screen.getByRole('dialog')).getByRole('button',{name:'연결'}));});
    expect(screen.getByRole('alert')).toHaveTextContent('등록할 수 없습니다.');
    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-   expect(api.history).toHaveBeenCalledTimes(2);
+   expect(api.history).toHaveBeenCalledTimes(1);
+   expect(vi.mocked(api.snapshot).mock.calls.length).toBeGreaterThan(1);
    expect(screen.getByRole('alert')).toHaveTextContent('등록할 수 없습니다.');
    expect(within(screen.getByRole('dialog')).getByLabelText('이름')).toHaveValue('작성 중인 프로젝트');
   }finally{

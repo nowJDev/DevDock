@@ -1,0 +1,12 @@
+// 승인·선택·반영을 분리하고 충돌 이후의 검토 편집을 보존하는지 확인한다.
+import {render,screen,waitFor} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import {describe,it,expect,vi} from 'vitest';
+import ImportReview from '../../src/knowledge/ImportReview';
+import type {ImportPreview} from '../../src/knowledge/contracts';
+import {knowledgeFixture} from './knowledge-fixture';
+const preview:ImportPreview={jobId:'job',projectId:'p',expectedProjectRevision:4,inputVersionIds:['v'],conflicts:[],candidates:[{candidateId:'c',fingerprint:'hash',kind:'workEntry',workDate:'2026-01-13',authoredDate:'2026-01-17',sourceSpans:[{versionId:'v',sha256:'sha',locator:{lines:{start:1,end:2}}}],proposedChanges:{text:'메뉴 구현',coverage:'partial'},reviewState:'pending'}]};
+describe('가져오기 검토',()=>{
+ it('import_requires_selection_and_retains_conflict_edits',async()=>{const f=knowledgeFixture(),user=userEvent.setup();const execute=vi.fn(async(command:string,_args?:Record<string,unknown>)=>{if(command==='apply_import')throw Error('import_revision_conflict');return {...preview,candidates:preview.candidates.map(c=>({...c,reviewState:'accepted' as const,proposedChanges:{text:'수정한 업무',coverage:'partial'}}))};});f.api.execute=async<T,>(command:string,args?:Record<string,unknown>)=>await execute(command,args) as T;render(<ImportReview api={f.api} preview={preview} onApplied={()=>{}}/>);expect(screen.getByRole('button',{name:'선택 반영'})).toBeDisabled();await user.click(screen.getByRole('button',{name:'후보 수정'}));const text=screen.getByLabelText('업무 내용');await user.clear(text);await user.type(text,'수정한 업무');await user.type(screen.getByLabelText('수정 이유'),'원문 날짜 확인');await user.click(screen.getByRole('button',{name:'후보 승인'}));await user.click(screen.getByRole('checkbox',{name:'업무 기록 후보 선택'}));await user.click(screen.getByRole('button',{name:'선택 반영'}));expect(await screen.findByRole('alert')).toHaveTextContent('conflict');expect(text).toHaveValue('수정한 업무');expect(execute).toHaveBeenCalledWith('apply_import',expect.objectContaining({selection:expect.objectContaining({expectedProjectRevision:4,mode:'history'})}));});
+ it('read_only_preview_does_not_apply_accepted_candidates',()=>{const f=knowledgeFixture();const execute=vi.spyOn(f.api,'execute');render(<ImportReview api={f.api} preview={{...preview,candidates:preview.candidates.map(c=>({...c,reviewState:'accepted'}))}} onApplied={()=>{}}/>);expect(screen.getByRole('button',{name:'선택 반영'})).toBeDisabled();expect(execute).not.toHaveBeenCalled();});
+});
