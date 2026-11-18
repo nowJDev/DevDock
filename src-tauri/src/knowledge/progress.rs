@@ -454,9 +454,21 @@ impl KnowledgeService {
         let mut checked = vec![];
         let mut covered = HashSet::new();
         for id in versions {
-            let (source,latest,hash):(String,String,String)=c.query_row("SELECT d.source_id,json_extract(d.payload,'$.sha256'),v.sha256 FROM document_versions v JOIN documents d USING(document_id) WHERE v.version_id=?1",[id.as_str().ok_or("invalid version")?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(err)?;
+            let (source,latest,hash,seen):(String,String,String,Option<String>)=c.query_row("SELECT d.source_id,json_extract(d.payload,'$.sha256'),v.sha256,json_extract(d.payload,'$.lastSeenAt') FROM document_versions v JOIN documents d USING(document_id) WHERE v.version_id=?1",[id.as_str().ok_or("invalid version")?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(err)?;
             if latest != hash {
                 return Ok(("unappliedChange", None));
+            }
+            let state = states["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["sourceId"] == source);
+            if seen.is_none()
+                || state.is_none_or(|s| {
+                    s["state"] != "online" || s["lastSuccessAt"].as_str() != seen.as_deref()
+                })
+            {
+                return Ok(("stale", None));
             }
             covered.insert(source);
         }
@@ -464,6 +476,17 @@ impl KnowledgeService {
             let Some(id) = source.as_str() else {
                 return Ok(("unlinked", None));
             };
+            let payload: String = c
+                .query_row(
+                    "SELECT payload FROM document_sources WHERE source_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(err)?;
+            let config: Value = serde_json::from_str(&payload).map_err(err)?;
+            if config["enabled"] != true || config["archived"] == true {
+                return Ok(("stale", None));
+            }
             if !covered.contains(id) {
                 return Ok(("unlinked", None));
             }
@@ -529,20 +552,36 @@ impl KnowledgeService {
                 let tx = c
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(err)?;
-                let (fresh, at) = self.basis_freshness(&tx, b)?;
+                let b = load_basis(&tx, id, b["basisId"].as_str().ok_or("basis missing")?)?;
+                let (fresh, at) = self.basis_freshness(&tx, &b)?;
                 if fresh != "fresh" {
                     continue;
                 }
                 let at = at.ok_or("missing source checked time")?;
                 let time = chrono::DateTime::parse_from_rfc3339(&at).map_err(err)?;
                 let date = time.with_timezone(&chrono::Local).date_naive().to_string();
-                let count = counts(b);
+                let count = counts(&b);
+                let mut spans = Vec::new();
+                for version in b["sourceVersionIds"].as_array().into_iter().flatten() {
+                    let version = version.as_str().ok_or("invalid source version")?;
+                    let hash: String = tx
+                        .query_row(
+                            "SELECT sha256 FROM document_versions WHERE version_id=?1",
+                            [version],
+                            |r| r.get(0),
+                        )
+                        .map_err(err)?;
+                    let lines = self.document_text(version)?.lines().count();
+                    if lines > 0 {
+                        spans.push(json!({"versionId":version,"sha256":hash,"locator":{"lines":{"start":1,"end":lines}}}));
+                    }
+                }
                 let point_id = format!(
                     "observed:{id}:{}:{}:{date}",
                     b["basisId"].as_str().unwrap(),
                     b["version"]
                 );
-                let point = json!({"date":date,"basisVersion":b["version"],"counts":count,"origin":"observed","coverage":"complete","sourceSpans":[],"capturedAt":at});
+                let point = json!({"date":date,"basisVersion":b["version"],"counts":count,"origin":"observed","coverage":"complete","sourceSpans":spans,"capturedAt":at});
                 tx.execute("INSERT INTO project_progress_points VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'observed',NULL,?9) ON CONFLICT(point_id) DO UPDATE SET total=excluded.total,verified=excluded.verified,reported=excluded.reported,payload=excluded.payload",params![point_id,id,b["basisId"].as_str(),b["version"].as_i64(),date,count["total"].as_i64(),count["verified"].as_i64(),count["reportedComplete"].as_i64(),point.to_string()]).map_err(err)?;
                 tx.commit().map_err(err)?;
                 written += 1;

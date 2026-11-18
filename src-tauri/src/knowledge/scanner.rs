@@ -524,7 +524,9 @@ impl KnowledgeService {
                 } else if !target.is_file() {
                     return Err("unchanged cache missing".into());
                 }
-                prepared.push((sid.to_owned(), source.clone(), f.clone(), target));
+                let mut record = f.clone();
+                record["lastSeenAt"] = s["checkedAt"].clone();
+                prepared.push((sid.to_owned(), source.clone(), record, target));
             }
         }
         let mut c = self.db()?;

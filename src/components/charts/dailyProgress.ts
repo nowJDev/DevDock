@@ -8,9 +8,10 @@ export interface DailyProgressRow {
 
 export function dailyProgressRows(
   points: DailyProgressPoint[],
-  days: 7 | 30,
+  days: number,
   today: string,
 ): DailyProgressRow[] | null {
+  if (!Number.isInteger(days) || days < 1 || days > 366) return null;
   const projectId = points[0]?.projectId;
   if (points.some(point => point.projectId !== projectId)) return null;
 

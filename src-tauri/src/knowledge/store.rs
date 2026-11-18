@@ -9,6 +9,7 @@ pub(crate) fn initialize(c: &mut Connection) -> Result<()> {
     tx.execute_batch(r#"
 CREATE TABLE IF NOT EXISTS document_config(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(revision>=0),payload TEXT NOT NULL CHECK(json_valid(payload)));
 CREATE TABLE IF NOT EXISTS document_sources(source_id TEXT PRIMARY KEY,payload TEXT NOT NULL CHECK(json_valid(payload)),connection_state TEXT NOT NULL DEFAULT 'unknown',last_success_at TEXT,last_error TEXT);
+CREATE TABLE IF NOT EXISTS document_scan_state(source_id TEXT PRIMARY KEY REFERENCES document_sources(source_id) ON DELETE RESTRICT,payload TEXT NOT NULL CHECK(json_valid(payload)));
 CREATE TABLE IF NOT EXISTS documents(document_id TEXT PRIMARY KEY,source_id TEXT NOT NULL REFERENCES document_sources(source_id) ON DELETE RESTRICT,normalized_path TEXT NOT NULL,payload TEXT NOT NULL CHECK(json_valid(payload)),UNIQUE(source_id,normalized_path));
 CREATE TABLE IF NOT EXISTS document_versions(version_id TEXT PRIMARY KEY,document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE RESTRICT,sha256 TEXT NOT NULL,cache_path TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes>=0),captured_at TEXT NOT NULL,authored_date TEXT,kind TEXT NOT NULL,payload TEXT NOT NULL CHECK(json_valid(payload)),UNIQUE(document_id,sha256));
 CREATE TABLE IF NOT EXISTS document_project_links(document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE RESTRICT,project_id TEXT NOT NULL,method TEXT NOT NULL,review_state TEXT NOT NULL CHECK(review_state IN ('pending','accepted','rejected','conflict')),PRIMARY KEY(document_id,project_id));
@@ -131,6 +132,7 @@ impl KnowledgeService {
         }
         bump(&tx, expected)?;
         tx.execute("INSERT INTO document_sources(source_id,payload) VALUES(?1,?2) ON CONFLICT(source_id) DO UPDATE SET payload=excluded.payload",params![s.source_id,serde_json::to_string(&s).map_err(err)?]).map_err(err)?;
+        tx.execute("INSERT INTO document_scan_state VALUES(?1,?2) ON CONFLICT(source_id) DO UPDATE SET payload=json_set(json_remove(document_scan_state.payload,'$.lastHashAt','$.nextRetryAt'),'$.state','unknown','$.failures',0)",params![s.source_id,json!({"sourceId":s.source_id,"state":"unknown","failures":0}).to_string()]).map_err(err)?;
         tx.commit().map_err(err)?;
         self.get_document_config()
     }

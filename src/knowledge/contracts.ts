@@ -20,4 +20,4 @@ export interface ImportCandidate { candidateId: string; fingerprint: string; kin
 export interface ImportPreview { jobId: string; projectId: string; basisId?: string; expectedProjectRevision: number; inputVersionIds: string[]; candidates: ImportCandidate[]; conflicts: string[] }
 export interface AnalysisJob { jobId: string; projectId: string; kind: 'progressAnalysis' | 'dailyReport' | 'documentPublishDraft'; state: string; inputVersionIds: string[]; expectedProjectRevision: number; basisId?: string; createdAt: string }
 export interface HistoryPoint { date: string; basisVersion: number; counts: Counts | null; origin: 'observed' | 'reconstructed' | 'correction'; coverage: string; sourceSpans: SourceSpan[]; capturedAt: string }
-export interface ProjectHistory { projectId: string; basisId: string; from: string; through: string; points: HistoryPoint[]; workEntries: Json[] }
+export interface ProjectHistory { projectId: string; basisId: string; from: string; through: string; points: HistoryPoint[]; workEntries: Json[]; comparisons?: HistoryPoint[] }

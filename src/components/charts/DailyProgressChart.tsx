@@ -6,9 +6,11 @@ import {dailyProgressRows, type DailyProgressRow} from './dailyProgress';
 
 interface DailyProgressChartProps {
   points: DailyProgressPoint[];
-  days: 7 | 30;
+  days: number;
   today: string;
   projectName: string;
+  provenance?: boolean;
+  onSelectDate?: (date:string) => void;
 }
 
 interface MountedChart {
@@ -76,10 +78,12 @@ function SourceTime({value}: {value?: string | null}) {
   return <time dateTime={source}>{display}</time>;
 }
 
-export default function DailyProgressChart({points, days, today, projectName}: DailyProgressChartProps) {
+export default function DailyProgressChart({points, days, today, projectName,provenance=false,onSelectDate}: DailyProgressChartProps) {
   const rows = useMemo(() => dailyProgressRows(points, days, today), [points, days, today]);
   const ref = useRef<HTMLDivElement>(null);
   const mountedChart = useRef<MountedChart | null>(null);
+  const selection=useRef(onSelectDate);selection.current=onSelectDate;
+  const visibleRows=useRef(rows);visibleRows.current=rows;
   const [failedRows, setFailedRows] = useState<DailyProgressRow[] | null>(null);
   const basisNoteId = useId();
   const hasData = rows?.some(row => row.point !== null) ?? false;
@@ -100,8 +104,15 @@ export default function DailyProgressChart({points, days, today, projectName}: D
       xAxis: {data: rows.map(row => row.date)},
       series: metrics.map(metric => ({
         id: metric.key,
-        data: rows.map(row => row.point?.[metric.key] ?? null),
+        data: rows.map(row => !row.point?null:provenance?{value:row.point[metric.key],symbol:row.point.origin==='reconstructed'?'diamond':row.point.origin==='correction'?'triangle':'circle',symbolSize:metric.symbolSize}:row.point[metric.key]),
       })),
+      ...(provenance?{tooltip:{renderMode:'richText',formatter:(params:unknown)=>{
+        const first=Array.isArray(params)?params[0]:params;
+        const index=first&&typeof first==='object'&&'dataIndex' in first?Number(first.dataIndex):-1;
+        const row=rows[index];if(!row?.point)return row?.date??'';
+        const origin=row.point.origin==='observed'?'실제 수집':row.point.origin==='correction'?'명시적 보정':'문서 복원';
+        return `${row.date}\n${origin} · 기준 v${row.point.basisVersion??0}\n전체 ${row.point.total} · 검증 ${row.point.verified} · 미검증 보고 ${row.point.reportedComplete}`;
+      }}}:{}),
     };
 
     function showFallback() {
@@ -141,6 +152,7 @@ export default function DailyProgressChart({points, days, today, projectName}: D
       instance.setOption({
         ...chartOptions,
         xAxis: {...chartOptions.xAxis, ...options.xAxis},
+        tooltip: {...chartOptions.tooltip,...options.tooltip},
         series: metrics.map((metric, index) => ({
           ...options.series[index],
           name: metric.label,
@@ -152,6 +164,7 @@ export default function DailyProgressChart({points, days, today, projectName}: D
           lineStyle: {width: 2, type: metric.lineType},
         })),
       });
+      if(selection.current)instance.on('click',(event:{dataIndex?:number})=>{const row=visibleRows.current?.[event.dataIndex??-1];if(row)selection.current?.(row.date);});
       if (typeof ResizeObserver !== 'undefined') {
         chart.observer = new ResizeObserver(() => {
           if (!element.hidden && mountedChart.current === chart) instance.resize();
@@ -163,7 +176,7 @@ export default function DailyProgressChart({points, days, today, projectName}: D
     });
 
     return () => { cancelled = true; };
-  }, [rows, hasData]);
+  }, [rows, hasData,provenance]);
 
   return <>
     {basisChanged && (
@@ -182,6 +195,7 @@ export default function DailyProgressChart({points, days, today, projectName}: D
     {!rows && <p className="daily-chart-note">프로젝트가 다른 기록이 포함되어 표시할 수 없습니다.</p>}
     {rows && !hasData && <p className="daily-chart-note">선택한 기간에 수집한 기록이 아직 없습니다.</p>}
     {chartFailed && <p className="daily-chart-note" role="status">차트를 표시할 수 없습니다. 일별 데이터 표에서 확인할 수 있습니다.</p>}
+    {provenance&&<p className="daily-chart-note">원형은 실제 수집, 마름모는 문서 복원, 삼각형은 명시적 보정입니다. 날짜를 선택해 업무와 근거를 확인할 수 있습니다.</p>}
     {rows && <details>
       <summary>일별 데이터 표</summary>
       <div className="daily-chart-table">
@@ -194,18 +208,20 @@ export default function DailyProgressChart({points, days, today, projectName}: D
               <th scope="col">마지막 수집 시각</th>
               <th scope="col">집계 기준</th>
               <th scope="col">자료 기준</th>
+              {provenance&&<><th scope="col">기록 출처</th><th scope="col">기준 버전</th></>}
             </tr>
           </thead>
           <tbody>
             {rows.map(({date, point}) => (
               <tr key={date}>
-                <th scope="row">{date}</th>
+                <th scope="row">{onSelectDate?<button type="button" className="text-button" aria-label={date+' 근거 보기'} onClick={()=>onSelectDate(date)}>{date}</button>:date}</th>
                 {point ? <>
                   {metrics.map(metric => <td key={metric.key}>{point[metric.key]}</td>)}
                   <td><time dateTime={point.at}>{collectionTime.format(new Date(point.at))}</time></td>
                   <td>{point.trackingBasis?.trim() ? point.trackingBasis : '미기록'}</td>
                   <td><SourceTime value={point.sourceCapturedAt}/></td>
-                </> : <td colSpan={metrics.length + 3}>미수집</td>}
+                  {provenance&&<><td>{point.origin==='observed'?'실제 수집':point.origin==='correction'?'명시적 보정':'문서 복원'}</td><td>{point.basisVersion===0?'기준 미기록':'v'+point.basisVersion}</td></>}
+                </> : <td colSpan={metrics.length + 3+(provenance?2:0)}>미수집</td>}
               </tr>
             ))}
           </tbody>

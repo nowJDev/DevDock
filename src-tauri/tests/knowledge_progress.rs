@@ -177,6 +177,8 @@ fn evidence_revision_expires_and_unapplied_source_never_creates_observation() {
             r.get(0)
         })
         .unwrap();
+    let point: Value = serde_json::from_str(&original).unwrap();
+    assert_eq!(point["sourceSpans"][0]["versionId"], doc["versionId"]);
     k.update_progress_task(
         "p",
         "dev",
@@ -202,5 +204,69 @@ fn evidence_revision_expires_and_unapplied_source_never_creates_observation() {
         })
         .unwrap(),
         original
+    );
+}
+
+#[test]
+fn missing_required_file_or_disabled_source_never_counts_as_fresh() {
+    let (d, e) = fixture();
+    let root = d.path().join("docs");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("work.md");
+    std::fs::write(&path, "T0 완료").unwrap();
+    let k = e.knowledge();
+    let mut source = json!({"sourceId":"s","scope":"project","projectId":"p","location":"local","root":root,"roles":["checklist"],"enabled":true});
+    k.upsert_document_source(source.clone(), 0).unwrap();
+    let scan = || {
+        k.scan_with_executable(
+            &[],
+            true,
+            std::path::Path::new(env!("CARGO_BIN_EXE_devdock-cli")),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap()
+    };
+    scan();
+    let doc = k.list_project_documents("p", 0).unwrap()["documents"][0].clone();
+    let mut b = basis("dev", "development", 1, 1);
+    b["authoritativeSourceIds"] = json!(["s"]);
+    b["sourceVersionIds"] = json!([doc["versionId"]]);
+    k.save_progress_basis(b, 0).unwrap();
+    k.activate_managed_progress("p", "dev", 1).unwrap();
+    scan();
+    std::fs::remove_file(&path).unwrap();
+    scan();
+    assert_ne!(
+        k.get_project_progress("p", Some("dev")).unwrap()["sourceFreshness"],
+        "fresh"
+    );
+    assert!(k
+        .read_document_version(doc["versionId"].as_str().unwrap(), 1, 200)
+        .is_ok());
+    std::fs::write(&path, "T0 완료").unwrap();
+    scan();
+    assert_eq!(
+        k.get_project_progress("p", Some("dev")).unwrap()["sourceFreshness"],
+        "fresh"
+    );
+    source["enabled"] = json!(false);
+    k.upsert_document_source(source.clone(), 1).unwrap();
+    assert_ne!(
+        k.get_project_progress("p", Some("dev")).unwrap()["sourceFreshness"],
+        "fresh"
+    );
+    let other = d.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    source["enabled"] = json!(true);
+    source["root"] = json!(other);
+    k.upsert_document_source(source, 2).unwrap();
+    assert_ne!(
+        k.get_project_progress("p", Some("dev")).unwrap()["sourceFreshness"],
+        "fresh"
+    );
+    scan();
+    assert_ne!(
+        k.get_project_progress("p", Some("dev")).unwrap()["sourceFreshness"],
+        "fresh"
     );
 }

@@ -7,6 +7,7 @@ import DailyProgressChart from './components/charts/DailyProgressChart';
 import ProgressChart from './components/charts/ProgressChart';
 import DocumentSettings from './knowledge/DocumentSettings';
 import ProjectKnowledge from './knowledge/ProjectKnowledge';
+import KnowledgeHistory from './knowledge/KnowledgeHistory';
 import Modal from './components/Dialog';
 import {knowledgeApi as defaultKnowledge,type KnowledgeApi} from './knowledge/api';
 type Page='overview'|'projects'|'monitors'|'activity'|'settings';
@@ -129,6 +130,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  const [page,setPage]=useState<Page>('overview');const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [registry,setRegistry]=useState<Registry|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const [subscriptionError,setSubscriptionError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);const [filter,setFilter]=useState('');const [selected,setSelected]=useState<ProjectProgress|null>(null);const [form,setForm]=useState<'project'|'monitor'|null>(null);const [remove,setRemove]=useState<{entity:'project'|'monitor';item:Project|Monitor}|null>(null);const [editing,setEditing]=useState<Project|Monitor|null>(null);const [checkout,setCheckout]=useState<{date:string;returnFocus:HTMLElement|null}|null>(null);const [baseRevision,setBaseRevision]=useState<number|undefined>();const [monitorKind,setMonitorKind]=useState('checklist');const settingsDirty=useRef(false);const [settings,setSettings]=useState<Settings|null>(null);const declineRef=useRef<HTMLButtonElement>(null);
  const [documentsOpen,setDocumentsOpen]=useState(false);
  const [chartRefresh,setChartRefresh]=useState(0);
+ const [historyMode,setHistoryMode]=useState<'auto'|'legacy'|'knowledge'>('auto');
  const [days,setDays]=useState<7|30>(7);
  const [dailyProjectId,setDailyProjectId]=useState<string>();
  const [snapshotVersion,setSnapshotVersion]=useState(0);
@@ -176,7 +178,8 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   return()=>{active=false;loadGeneration.current++;dashboardLoad.current=null;clearInterval(timer);cleanup.splice(0).forEach(fn=>fn());};
  },[api,load]);
  useEffect(()=>{if(checkout)declineRef.current?.focus();},[checkout]);
- const dailyHistory=useProjectHistory(api,page==='overview'?dailyProjectId:undefined,days*24,chartRefresh);
+ const advancedChart=historyMode==='knowledge'||historyMode==='auto'&&snapshot?.projects.find(p=>p.id===dailyProjectId)?.progressMode==='managed';
+ const dailyHistory=useProjectHistory(api,page==='overview'&&!advancedChart?dailyProjectId:undefined,days*24,chartRefresh);
  const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,chartRefresh);
  async function perform(action:()=>Promise<unknown>,message?:string){setBusy(true);setError('');try{await action();if(message)setNotice(message);await load(true);return true;}catch(e){setError(String(e).replace(/^Error: /,''));return false;}finally{setBusy(false);}}
  async function answer(answer:boolean){if(!checkout)return;const date=checkout.date;await perform(async()=>{const result=await api.answerCheckout(answer,date);setCheckout(null);if(result.attendanceError){setNotice('');setError('퇴근 실행 실패: '+result.attendanceError);return;}setNotice(result.expired?`${date} 퇴근 확인이 만료되어 실행되지 않았습니다.`:answer?'퇴근 실행 결과를 확인해 주세요.':`${date} 퇴근 알림을 거절했습니다.`);});}
@@ -215,14 +218,15 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      <select aria-label="진행현황 프로젝트" value={dailyProjectId} onChange={e=>setDailyProjectId(e.target.value)}>
       {activeProjects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
      </select>
-     <select aria-label="진행현황 기간" value={days} onChange={e=>setDays(e.target.value==='30'?30:7)}><option value={7}>최근 7일</option><option value={30}>최근 30일</option></select>
-     <button type="button" className="subtle-button" aria-label="일별 차트 새로고침" onClick={()=>setChartRefresh(n=>n+1)}><RefreshCw size={14}/>새로고침</button>
+     {!advancedChart&&<><select aria-label="진행현황 기간" value={days} onChange={e=>setDays(e.target.value==='30'?30:7)}><option value={7}>최근 7일</option><option value={30}>최근 30일</option></select>
+     <button type="button" className="subtle-button" aria-label="일별 차트 새로고침" onClick={()=>setChartRefresh(n=>n+1)}><RefreshCw size={14}/>새로고침</button></>}
+     <button type="button" className="subtle-button" onClick={()=>setHistoryMode(advancedChart?'legacy':'knowledge')}>{advancedChart?'이전 집계 차트':'기준·과거 이력'}</button>
     </div>}
    </div>
    {dailyProject?<div className="daily-panel-content">
     <h3 className="daily-selected">{dailyProject.name}</h3>
     <ProjectSource project={dailyProject} current/>
-    {dailyHistory.result?.state==='error'?<HistoryError message={dailyHistory.result.message} onRetry={dailyHistory.retry}/>
+    {advancedChart?<KnowledgeHistory key={dailyProject.id} api={knowledge} project={dailyProject} refreshVersion={chartRefresh}/>:dailyHistory.result?.state==='error'?<HistoryError message={dailyHistory.result.message} onRetry={dailyHistory.retry}/>
      :dailyHistory.result?.state==='ready'?<DailyProgressChart key={dailyProject.id} points={dailyPoints} days={days} today={chartToday} projectName={dailyProject.name}/>
      :<p className="history-pending" role="status">일별 진행 기록을 불러오는 중입니다.</p>}
    </div>:<div className="empty-project"><FolderKanban size={24}/><h3>연결된 프로젝트가 없습니다.</h3><p>프로젝트를 연결하면 일별 진행 기록을 볼 수 있습니다.</p></div>}
