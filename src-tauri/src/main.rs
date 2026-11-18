@@ -142,6 +142,24 @@ fn main() {
             tray::setup(app.handle())?;
             listen_restore(app.handle().clone(), restore_event);
             desktop::background(app.handle().clone(), runtime);
+            if let Some(window) = app.get_webview_window("main") {
+                // Windows can suppress resize callbacks when the window becomes iconic.
+                // Reconcile the native state independently of dashboard collection.
+                tauri::async_runtime::spawn(async move {
+                    let mut checks = tokio::time::interval(std::time::Duration::from_millis(150));
+                    checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        checks.tick().await;
+                        match (window.is_visible(), window.is_minimized()) {
+                            (Ok(true), Ok(true)) => {
+                                let _ = window.hide();
+                            }
+                            (Err(_), _) | (_, Err(_)) => break,
+                            _ => {}
+                        }
+                    }
+                });
+            }
             if !background {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();

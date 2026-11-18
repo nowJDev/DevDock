@@ -168,11 +168,12 @@ fn network_path(path: &Path) -> bool {
     false
 }
 fn normalized(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("//?/")
-        .trim_end_matches('/')
-        .to_lowercase()
+    let slash = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    let text = slash.trim_end_matches('/');
+    if let Some(unc) = text.strip_prefix("//?/unc/") {
+        return format!("//{unc}");
+    }
+    text.trim_start_matches("//?/").to_owned()
 }
 fn under(path: &Path, root: &Path) -> bool {
     let p = normalized(path);
@@ -293,6 +294,44 @@ impl KnowledgeService {
         let mut paths = vec![];
         let mut expected = HashMap::new();
         let registry = self.engine.registry()?;
+        let config = self.get_document_config()?;
+        let sources = config["sources"]
+            .as_array()
+            .ok_or("invalid document sources")?;
+        let foreign = |path: &Path| {
+            sources
+                .iter()
+                .filter(|s| {
+                    s["scope"] == "project"
+                        && s["projectId"] != r.project_id
+                        && s["enabled"] == true
+                        && s["archived"] != true
+                })
+                .any(|s| {
+                    s["root"]
+                        .as_str()
+                        .is_some_and(|root| under(path, Path::new(root)))
+                })
+                || registry["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["id"] != r.project_id && p["archived"] != true)
+                    .any(|p| {
+                        p["root"]
+                            .as_str()
+                            .is_some_and(|root| under(path, Path::new(root)))
+                            || p["referenceDocuments"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|reference| {
+                                    reference.as_str().is_some_and(|name| {
+                                        normalized(path) == normalized(Path::new(name))
+                                    })
+                                })
+                    })
+        };
         for selected in r.selected_files {
             let (path, hash) = match selected {
                 FileInput::Path(p) => (p, None),
@@ -301,25 +340,7 @@ impl KnowledgeService {
             if !Path::new(&path).is_absolute() {
                 return Err("report requires exact absolute file paths".into());
             }
-            if !r.allow_cross_project
-                && registry["projects"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|p| p["id"] != r.project_id && p["archived"] != true)
-                    .any(|p| {
-                        p["root"]
-                            .as_str()
-                            .is_some_and(|root| under(Path::new(&path), Path::new(root)))
-                            || p["referenceDocuments"].as_array().is_some_and(|refs| {
-                                refs.iter().any(|v| {
-                                    v.as_str().is_some_and(|s| {
-                                        normalized(Path::new(s)) == normalized(Path::new(&path))
-                                    })
-                                })
-                            })
-                    })
-            {
+            if !r.allow_cross_project && foreign(Path::new(&path)) {
                 return Err("다른 프로젝트 자료는 명시적으로 포함을 선택해야 합니다.".into());
             }
             if seen.insert(normalized(Path::new(&path))) {
@@ -334,6 +355,13 @@ impl KnowledgeService {
             return Err("보고 근거 본문이 없습니다.".into());
         }
         for source in &sources {
+            if !r.allow_cross_project
+                && source["canonicalPath"]
+                    .as_str()
+                    .is_some_and(|actual| foreign(Path::new(actual)))
+            {
+                return Err("다른 프로젝트 자료는 명시적으로 포함을 선택해야 합니다.".into());
+            }
             if expected
                 .get(source["path"].as_str().unwrap_or(""))
                 .is_some_and(|h| source["sha256"] != *h)
@@ -442,7 +470,7 @@ impl KnowledgeService {
         if current
             .iter()
             .zip(sources)
-            .any(|(a, b)| a["sha256"] != b["sha256"])
+            .any(|(a, b)| a["sha256"] != b["sha256"] || a["canonicalPath"] != b["canonicalPath"])
         {
             return Err("report_source_changed: 새 자료를 다시 읽어 주세요.".into());
         }

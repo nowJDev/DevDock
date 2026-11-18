@@ -2,7 +2,7 @@
 import {call} from '../api';
 import {knowledgeReadCommands} from './contracts';
 import type {AnalysisJob, DocumentConfigView, DocumentSource, DocumentVersion, ImportPreview, Json, ProjectHistory, ProjectProgressView} from './contracts';
-export interface SourceState { sourceId: string; state: string; checkedAt?: string; lastSuccessAt?: string; nextRetryAt?: string; errors?: string[] }
+export interface SourceState { sourceId: string; state: string; checkedAt?: string; lastSuccessAt?: string; nextRetryAt?: string; errors?: string[]; publication?:{runId?:string;receiptState:string;fullAudit:false} }
 export interface KnowledgeApi {
   execute<T = Json>(command: string, args?: Record<string, unknown>): Promise<T>;
   config(): Promise<DocumentConfigView>;
@@ -16,7 +16,7 @@ export interface KnowledgeApi {
   progress(projectId: string, basisId?: string): Promise<ProjectProgressView>;
   history(projectId: string, basisId: string, from: string, through: string): Promise<ProjectHistory>;
   jobs(projectId: string): Promise<{jobs: AnalysisJob[]}>;
-  createAnalysis(projectId: string, inputVersionIds: string[], basisId?: string): Promise<AnalysisJob>;
+  createAnalysis(projectId: string, inputVersionIds: string[], basisId?: string, basisVersion?:number): Promise<AnalysisJob>;
   parse(jobId: string): Promise<ImportPreview>;
   preview(jobId: string): Promise<ImportPreview>;
 }
@@ -37,7 +37,7 @@ export const knowledgeApi: KnowledgeApi = {
   progress: (projectId, basisId) => knowledgeApi.execute('get_project_progress', {projectId, basisId: basisId ?? null}),
   history: (projectId, basisId, from, through) => knowledgeApi.execute('get_project_history', {projectId, basisId, from, through}),
   jobs: projectId => knowledgeApi.execute('list_analysis_jobs', {projectId}),
-  createAnalysis: (projectId, inputVersionIds, basisId) => knowledgeApi.execute('create_analysis_job', {request: {projectId, inputVersionIds, basisId: basisId ?? null}}),
+  createAnalysis: (projectId, inputVersionIds, basisId,basisVersion) => knowledgeApi.execute('create_analysis_job', {request: {projectId, inputVersionIds, basisId: basisId ?? null,basisVersion:basisVersion??null}}),
   parse: jobId => knowledgeApi.execute('parse_analysis_job', {jobId}),
   preview: jobId => knowledgeApi.execute('get_import_preview', {jobId}),
 };

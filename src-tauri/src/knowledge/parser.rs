@@ -19,10 +19,34 @@ fn dates(text: &str) -> Option<String> {
         .find_map(|s| date(s).ok())
 }
 pub fn match_projects(filename: &str, body: &str, projects: &[Value]) -> Vec<String> {
-    let tokens: Vec<_> = filename
-        .split(|c: char| !c.is_alphanumeric())
-        .map(str::to_lowercase)
+    let normalized = filename.replace('\\', "/").to_lowercase();
+    let leaf = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let tokenize = |value: &str| {
+        value
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    let tokens = tokenize(leaf);
+    let explicit: Vec<_> = projects
+        .iter()
+        .filter(|p| p["archived"] != true)
+        .filter(|p| {
+            p["referenceDocuments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|v| {
+                    v.as_str()
+                        .is_some_and(|s| s.replace('\\', "/").to_lowercase() == normalized)
+                })
+        })
+        .filter_map(|p| p["id"].as_str().map(str::to_owned))
         .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
     let body = body.replace('\\', "/").to_lowercase();
     projects
         .iter()
@@ -36,9 +60,12 @@ pub fn match_projects(filename: &str, body: &str, projects: &[Value]) -> Vec<Str
                 .replace('\\', "/")
                 .trim_end_matches('/')
                 .to_lowercase();
-            let token = tokens
-                .iter()
-                .any(|t| *t == id || (!name.is_empty() && *t == name));
+            let token = [id, name].iter().map(|alias| tokenize(alias)).any(|label| {
+                !label.is_empty()
+                    && tokens
+                        .windows(label.len())
+                        .any(|sequence| sequence == label)
+            });
             token
                 && !root.is_empty()
                 && body.match_indices(&root).any(|(at, _)| {
@@ -102,7 +129,7 @@ pub fn parse_document(version: &str, hash: &str, text: &str, path: &str) -> Resu
                 .or_else(|| t.get("state"))
                 .and_then(Value::as_str)
                 .ok_or("task state missing")?;
-            out.push(json!({"taskId":id,"title":t.get("title").or_else(||t.get("name")).and_then(Value::as_str).unwrap_or(id),"revision":1,"state":task_state(state)?,"sourceSpan":span(version,hash,json!({"jsonPointer":format!("/tasks/{i}")}))}));
+            out.push(json!({"taskId":id,"title":t.get("title").or_else(||t.get("name")).and_then(Value::as_str).unwrap_or(id),"revision":t["revision"].as_i64().filter(|v|*v>0).unwrap_or(1),"state":task_state(state)?,"parentId":t["parentId"].as_str().or_else(||t["parent_id"].as_str()),"sourceSpan":span(version,hash,json!({"jsonPointer":format!("/tasks/{i}")}))}));
         }
         return Ok(vec![candidate(
             "basisDefinition",
@@ -122,8 +149,9 @@ pub fn parse_document(version: &str, hash: &str, text: &str, path: &str) -> Resu
     let mut fenced = false;
     let mut result = vec![];
     let mut tasks = vec![];
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
+    let mut parents: Vec<(usize, String)> = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
         if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
             continue;
@@ -132,6 +160,7 @@ pub fn parse_document(version: &str, hash: &str, text: &str, path: &str) -> Resu
             continue;
         }
         if line.starts_with('#') {
+            parents.clear();
             if let Some(d) = dates(line) {
                 work = Some(d)
             }
@@ -175,7 +204,18 @@ pub fn parse_document(version: &str, hash: &str, text: &str, path: &str) -> Resu
                 "!" => "blocked",
                 _ => continue,
             };
-            tasks.push(json!({"taskId":id,"title":title,"revision":1,"state":state,"sourceSpan":span(version,hash,json!({"lines":{"start":i+1,"end":i+1}}))}));
+            let indent = raw
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(|c| if c == '\t' { 4 } else { 1 })
+                .sum();
+            while parents.last().is_some_and(|(depth, _)| *depth >= indent) {
+                parents.pop();
+            }
+            tasks.push(json!({"taskId":id,"title":title,"revision":1,"state":state,
+                "parentId":parents.last().map(|(_,parent)|parent),
+                "sourceSpan":span(version,hash,json!({"lines":{"start":i+1,"end":i+1}}))}));
+            parents.push((indent, id.into()));
             continue;
         }
         if actual && !line.is_empty() && work.is_some() {
@@ -195,7 +235,7 @@ pub fn parse_document(version: &str, hash: &str, text: &str, path: &str) -> Resu
     if !tasks.is_empty() {
         result.push(candidate(
             "basisDefinition",
-            json!({"name":path,"kind":"development","tasks":tasks}),
+            json!({"name":path,"kind":if tasks.iter().all(|t|t["taskId"].as_str().is_some_and(|s|s.to_ascii_uppercase().starts_with("UAT-"))){"acceptance"}else{"development"},"tasks":tasks}),
             vec![span(
                 version,
                 hash,

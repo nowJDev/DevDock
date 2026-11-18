@@ -71,7 +71,7 @@ fn fake_share() -> (
         },
     ];
     let files=[
-        ("프로젝트_문서정리_실행지침.md", "규약 v1.3.0".to_owned()),
+        ("프로젝트_문서정리_실행지침.md", "- 지침 버전. 1.3.0.".to_owned()),
         ("프로젝트 개발 지침/문서 배치표.json",json!({
             "schema_version":3,"run_id":"original","source_head":"source","publication_status":"pending_final_verification",
             "entries":targets.iter().map(|t|json!({"target":t.path})).collect::<Vec<_>>(),
@@ -129,7 +129,10 @@ fn publish_and_recover_only_unchanged_owned_files() {
         &fs::read_to_string(root.join(&selected[1])).unwrap()
     ));
     fs::write(root.join(&selected[0]), "게시 후 사람의 수정").unwrap();
-    let recovered = ops::restore(&root, &stage, "test", &changes, &selected, &selected).unwrap();
+    let recovered = ops::restore(
+        &root, &stage, "test", &protocol, &changes, &selected, &selected,
+    )
+    .unwrap();
     assert_eq!(recovered.state, "restoreConflicts");
     assert_eq!(recovered.files[0].state, "conflict");
     assert_eq!(recovered.files[1].state, "restored");
@@ -178,9 +181,101 @@ fn partial_publish_is_not_verified() {
     assert_ne!(published.files[1].state, "verified");
     drop(handle);
     assert_eq!(
-        ops::restore(&root, &stage, "partial", &changes, &selected, &selected)
+        ops::restore(&root, &stage, "partial", &protocol, &changes, &selected, &selected)
             .unwrap()
             .state,
         "restored"
     );
+}
+
+#[test]
+fn selective_restore_of_a_complete_run_does_not_keep_the_nas_lock() {
+    use devdock_core::knowledge::{publish_files as ops, scanner::sha256};
+    use std::fs;
+    let (dir, root, targets) = fake_share();
+    let stage = dir.path().join("stage");
+    fs::create_dir(&stage).unwrap();
+    let (protocol, prior) = ops::inspect(&root, &targets).unwrap();
+    let changes: Vec<_> = prior
+        .into_iter()
+        .map(|p| {
+            let new = ops::tag("승인한 게시문", "test");
+            ops::FileChange {
+                path: p.target.path,
+                role: p.target.role,
+                before: p.sha256,
+                after: sha256(new.as_bytes()),
+                old_text: p.body,
+                new_text: new,
+            }
+        })
+        .collect();
+    let chosen: Vec<_> = targets.iter().map(|t| t.path.clone()).collect();
+    ops::apply(&root, &stage, "test", &protocol, &changes, &chosen).unwrap();
+    let restored = ops::restore(
+        &root,
+        &stage,
+        "test",
+        &protocol,
+        &changes,
+        &chosen,
+        &chosen[..1],
+    )
+    .unwrap();
+    assert_eq!(restored.state, "partiallyRestored");
+    assert_eq!(
+        fs::read_to_string(root.join(&chosen[0])).unwrap(),
+        changes[0].old_text
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(&chosen[1])).unwrap(),
+        changes[1].new_text
+    );
+    assert!(ops::inspect(&root, &targets).is_ok());
+}
+
+#[test]
+fn older_version_in_a_new_guide_does_not_authorize_writes() {
+    use devdock_core::knowledge::publish_files as ops;
+    let (_d, root, targets) = fake_share();
+    std::fs::write(
+        root.join("프로젝트_문서정리_실행지침.md"),
+        "- 지침 버전. 2.0.0.\n이전 배포 1.3.0.\n",
+    )
+    .unwrap();
+    assert!(ops::inspect(&root, &targets).is_err());
+}
+
+#[test]
+fn missing_backup_keeps_recovery_open() {
+    use devdock_core::knowledge::{publish_files as ops, scanner::sha256};
+    use std::fs;
+    let (dir, root, targets) = fake_share();
+    let stage = dir.path().join("stage");
+    fs::create_dir(&stage).unwrap();
+    let (protocol, prior) = ops::inspect(&root, &targets).unwrap();
+    let changes: Vec<_> = prior
+        .into_iter()
+        .map(|p| {
+            let new = "새 본문".to_owned();
+            ops::FileChange {
+                path: p.target.path,
+                role: p.target.role,
+                before: p.sha256,
+                after: sha256(new.as_bytes()),
+                old_text: p.body,
+                new_text: new,
+            }
+        })
+        .collect();
+    let selected = vec![targets[0].path.clone()];
+    ops::apply(&root, &stage, "test", &protocol, &changes, &selected).unwrap();
+    fs::remove_file(stage.join("before-0.md")).unwrap();
+    let recovery = ops::restore(
+        &root, &stage, "test", &protocol, &changes, &selected, &selected,
+    )
+    .unwrap();
+    assert_eq!(recovery.state, "recoveryRequired");
+    assert_eq!(recovery.files[0].state, "uncertain");
+    assert!(ops::inspect(&root, &targets).is_err());
 }

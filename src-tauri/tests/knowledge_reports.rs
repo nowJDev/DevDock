@@ -258,3 +258,33 @@ fn cli_submits_directly_to_desktop_memory() {
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("보관하지않는초안문구"));
 }
+
+#[test]
+fn cross_project_report_rejects_registered_sources_outside_checkout() {
+    let (dir, e, k, _input) = fixture();
+    e.mutate(
+        json!({"entity":"project","action":"upsert","value":{
+            "id":"q","name":"다른 프로젝트","root":dir.path().join("other-checkout"),
+        }}),
+        None,
+    )
+    .unwrap();
+    let records = dir.path().join("other-records");
+    fs::create_dir(&records).unwrap();
+    let file = records.join("기록.md");
+    fs::write(&file, "다른 프로젝트 자료").unwrap();
+    k.upsert_document_source(
+        json!({"sourceId":"other","scope":"project","projectId":"q","enabled":true,
+            "root":records,"location":"local","roles":["dailyLog"],
+        }),
+        0,
+    )
+    .unwrap();
+    let mut request = json!({"projectId":"p","heading":"샘플 프로젝트","selectedFiles":[file]});
+    assert!(k
+        .create_report_request(request.clone())
+        .unwrap_err()
+        .contains("다른 프로젝트"));
+    request["allowCrossProject"] = json!(true);
+    assert!(k.create_report_request(request).is_ok());
+}

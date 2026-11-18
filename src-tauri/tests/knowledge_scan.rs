@@ -201,3 +201,55 @@ fn cleanup_commit_failure_never_removes_cache_bytes() {
     assert!(e.knowledge().cleanup_document_cache().is_err());
     assert!(e.knowledge().read_document_version(&old, 1, 1).is_ok());
 }
+
+#[test]
+fn cache_cleanup_preserves_an_older_version_when_it_becomes_current_again() {
+    let (_d, e, root) = fixture();
+    let p = Path::new(&root).join("a.md");
+    fs::write(&p, "first").unwrap();
+    scan(&e);
+    let k = e.knowledge();
+    let old = k.list_project_documents("p", 0).unwrap()["documents"][0]["versionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let c = rusqlite::Connection::open(e.data_dir().join("devdock.sqlite3")).unwrap();
+    c.execute(
+        "UPDATE document_versions SET captured_at='2000-01-01T00:00:00Z' WHERE version_id=?1",
+        [&old],
+    )
+    .unwrap();
+    fs::write(&p, "second").unwrap();
+    scan(&e);
+    fs::write(&p, "first").unwrap();
+    scan(&e);
+    k.cleanup_document_cache().unwrap();
+    assert_eq!(
+        k.read_document_version(&old, 1, 1).unwrap()["text"],
+        "first"
+    );
+}
+
+#[test]
+fn failed_scan_ingest_cleans_worker_staging() {
+    let (_dir, e, root) = fixture();
+    fs::write(Path::new(&root).join("a.md"), "스테이징 파일").unwrap();
+    // Fail after the actual worker has staged bytes, before any DB row can commit.
+    let c = rusqlite::Connection::open(e.data_dir().join("devdock.sqlite3")).unwrap();
+    c.execute_batch("CREATE TRIGGER fail_scan BEFORE INSERT ON documents BEGIN SELECT RAISE(ABORT, 'fixture'); END;").unwrap();
+    assert!(e
+        .knowledge()
+        .scan_with_executable(
+            &["s".into()],
+            true,
+            Path::new(env!("CARGO_BIN_EXE_devdock-cli")),
+            Duration::from_secs(5)
+        )
+        .is_err());
+    assert_eq!(
+        fs::read_dir(e.data_dir().join("document-staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}

@@ -11,6 +11,7 @@ struct Request {
     project_id: String,
     input_version_ids: Vec<String>,
     basis_id: Option<String>,
+    basis_version: Option<i64>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -85,7 +86,7 @@ impl KnowledgeService {
         let mut inputs = vec![];
         let c = self.db()?;
         for id in &r.input_version_ids {
-            let(hash,size,doc):(String,i64,String)=c.query_row("SELECT v.sha256,v.bytes,v.document_id FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND l.project_id=?2 AND l.review_state='accepted'",params![id,r.project_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(err)?;
+            let(hash,size,doc):(String,i64,String)=c.query_row("SELECT v.sha256,v.bytes,v.document_id FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND l.project_id=?2 AND l.review_state='accepted' AND (l.method!='crossChecked' OR json_extract(v.payload,'$.crossCheckedProject')=l.project_id)",params![id,r.project_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(err)?;
             if hashes.insert(hash.clone()) {
                 ids.push(id.clone());
                 bytes += size;
@@ -105,14 +106,16 @@ impl KnowledgeService {
         self.require_project(&r.project_id)?;
         let ctl = control(&tx, &r.project_id)?;
         let basis = if let Some(id) = &r.basis_id {
-            let text:String=tx.query_row("SELECT payload FROM progress_bases WHERE basis_id=?1 AND project_id=?2 ORDER BY version DESC LIMIT 1",params![id,r.project_id],|r|r.get(0)).map_err(err)?;
-            serde_json::from_str::<Value>(&text).map_err(err)?
+            super::progress::load_basis_version(&tx, &r.project_id, id, r.basis_version)?
         } else {
             Value::Null
         };
         let id = Uuid::new_v4().to_string();
         let mut job = json!({"jobId":id,"projectId":r.project_id,"kind":kind,"state":"pending","basisId":r.basis_id,"basisVersion":basis["version"],"expectedProjectRevision":ctl["revision"],"inputVersionIds":ids,"inputs":inputs,"allowedTaskIds":basis["tasks"].as_array().map(|ts|ts.iter().map(|t|t["taskId"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"createdAt":now(),"analysisVersion":1});
         if let Some(extra) = extra {
+            if extra["basisViewRevision"] != ctl["revision"] {
+                return Err("게시 진행 기준이 준비 중 변경되었습니다.".into());
+            }
             job["publishContext"] = extra;
         }
         tx.execute(
@@ -155,14 +158,18 @@ impl KnowledgeService {
     pub fn list_analysis_jobs(&self, project: &str) -> Result<Value> {
         self.require_project(project)?;
         let c = self.db()?;
-        let mut q=c.prepare("SELECT job_id FROM analysis_jobs WHERE project_id=?1 ORDER BY rowid DESC LIMIT 100").map_err(err)?;
+        let mut q=c.prepare("SELECT json_object('jobId',job_id,'projectId',project_id,'kind',kind,'state',state,
+            'requestId',json_extract(payload,'$.requestId'),'basisId',json_extract(payload,'$.basisId'),
+            'expectedProjectRevision',json_extract(payload,'$.expectedProjectRevision'),
+            'createdAt',json_extract(payload,'$.createdAt'),'inputVersionIds',json_extract(payload,'$.inputVersionIds'))
+            FROM analysis_jobs WHERE project_id=?1 ORDER BY rowid DESC LIMIT 100").map_err(err)?;
         let ids = q
             .query_map([project], |r| r.get::<_, String>(0))
             .map_err(err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(err)?;
         Ok(
-            json!({"jobs":ids.iter().map(|id|self.get_analysis_job(id)).collect::<Result<Vec<_>>>()?}),
+            json!({"jobs":ids.iter().map(|row|serde_json::from_str::<Value>(row).map_err(err)).collect::<Result<Vec<_>>>()?}),
         )
     }
     pub fn claim_analysis_job(&self, id: &str, owner: &str) -> Result<Value> {
@@ -402,18 +409,23 @@ impl KnowledgeService {
         let job = load_job(&c, id)?;
         let mut q = c
             .prepare(
-                "SELECT payload,review_state FROM import_candidates WHERE job_id=?1 ORDER BY rowid",
+                "SELECT c.payload,c.review_state,EXISTS(SELECT 1 FROM import_batch_items i JOIN import_batches b USING(batch_id) WHERE i.candidate_id=c.candidate_id AND b.active=1) FROM import_candidates c WHERE c.job_id=?1 ORDER BY c.rowid",
             )
             .map_err(err)?;
         let cs = q
             .query_map([id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
             })
             .map_err(err)?
             .map(|r| {
-                let (text, state) = r.map_err(err)?;
+                let (text, state, applied) = r.map_err(err)?;
                 let mut v: Value = serde_json::from_str(&text).map_err(err)?;
                 v["reviewState"] = json!(state);
+                v["applied"] = json!(applied);
                 Ok(v)
             })
             .collect::<Result<Vec<_>>>()?;

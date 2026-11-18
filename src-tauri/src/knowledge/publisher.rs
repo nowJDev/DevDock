@@ -157,6 +157,22 @@ fn public_run(state: &str, value: &Value, result: Value) -> Value {
         "sourceRunId":value["plan"]["protocol"]["runId"],"fullAudit":false,"error":value["error"]})
 }
 
+fn status_body(basis: &Value) -> Result<String> {
+    if basis.is_null() {
+        return Err("현재 상태 문서를 게시하려면 승인된 진행 기준을 선택해 주세요.".into());
+    }
+    let counts = super::progress::counts(basis);
+    Ok(format!("### DevDock 기준 집계\n\n기준 버전 {} · 전체 {} · 검증 완료 {} · 완료 보고 {} · 진행 중 {} · 막힘 {}",
+        basis["version"], counts["total"],counts["verified"],counts["reportedComplete"],counts["inProgress"],counts["blocked"]))
+}
+fn index_body(prior: &[Prior], path: &str) -> String {
+    let mut links = vec!["### DevDock 게시 문서".to_owned()];
+    for entry in prior.iter().filter(|entry| entry.target.path != path) {
+        let name = entry.target.path.replace('\\', "/");
+        links.push(format!("- [{}](<{}>)", name.replace(['[', ']'], ""), name));
+    }
+    links.join("\n")
+}
 fn managed_body(original: &str, body: &str) -> Result<String> {
     const OPEN: &str = "<!-- devdock-managed:start -->";
     const CLOSE: &str = "<!-- devdock-managed:end -->";
@@ -344,7 +360,7 @@ impl KnowledgeService {
         }
         let progress = self.get_project_progress(&r.project_id, r.basis_id.as_deref())?;
         let context = json!({"sourceId":r.source_id,"configRevision":revision,
-            "protocol":inspected["protocol"],"prior":inspected["prior"],"basis":progress["basis"],
+            "protocol":inspected["protocol"],"prior":inspected["prior"],"basis":progress["basis"],"basisViewRevision":progress["revision"],
             "instructions":"선택한 원문 버전만 읽고 문서별 근거 행과 함께 패치를 제안합니다. 체크리스트는 승인 기준의 작업 ID, 예상 기존 체크 여부, 승인된 현재 상태, 작업 revision과 원문 범위를 사용합니다. 셸 명령, 배포, NAS 직접 쓰기, 새 수락 증거 생성을 수행하지 않습니다."});
         self.create_job(json!({"projectId":r.project_id,"inputVersionIds":r.input_version_ids,"basisId":r.basis_id}),
             "documentPublishDraft",Some(context))
@@ -405,13 +421,16 @@ impl KnowledgeService {
                     return Err("일반 문서에는 작업 상태 패치를 사용할 수 없습니다.".into());
                 }
                 self.publish_spans(job, &patch.source_spans)?;
-                managed_body(
-                    &previous.body,
-                    patch
+                let content = match previous.target.role.as_str() {
+                    "status" => status_body(&context["basis"])?,
+                    "index" => index_body(&prior, &patch.path),
+                    _ => patch
                         .body
                         .as_deref()
-                        .ok_or("게시할 본문을 입력해 주세요.")?,
-                )?
+                        .ok_or("게시할 본문을 입력해 주세요.")?
+                        .to_owned(),
+                };
+                managed_body(&previous.body, &content)?
             };
             let new_text = files::tag(&body, run);
             if new_text.len() > 2 * 1024 * 1024 {
@@ -608,7 +627,7 @@ impl KnowledgeService {
         } else {
             if !matches!(
                 state.as_str(),
-                "filesVerified" | "recoveryRequired" | "restoreConflicts"
+                "filesVerified" | "recoveryRequired" | "restoreConflicts" | "partiallyRestored"
             ) || payload["originalRoot"] != json!(root)
             {
                 return Err("원래 NAS 경로의 완료 또는 복구 대기 작업을 선택해 주세요.".into());
@@ -738,7 +757,15 @@ pub fn worker_main(data: &Path) -> Result<Value> {
                 "restoring" => {
                     let restore: Vec<String> =
                         serde_json::from_value(value["restorePaths"].clone()).map_err(err)?;
-                    files::restore(&root, &stage, &run, &plan.files, &selected, &restore)?
+                    files::restore(
+                        &root,
+                        &stage,
+                        &run,
+                        &plan.protocol,
+                        &plan.files,
+                        &selected,
+                        &restore,
+                    )?
                 }
                 _ => return Err("승인된 게시 실행이 없습니다.".into()),
             };

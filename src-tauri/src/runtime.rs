@@ -536,6 +536,7 @@ pub mod desktop {
             super::maintenance_worker(
                 || {
                     let _ = maintenance_engine.maintain_history(&Local::now().to_rfc3339());
+                    let _ = maintenance_engine.knowledge().cleanup_document_cache();
                 },
                 || {
                     std::thread::sleep(Duration::from_secs(3600));

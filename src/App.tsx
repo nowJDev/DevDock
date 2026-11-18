@@ -211,7 +211,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   <div className="metrics" aria-label="프로젝트 요약">
    <div><span><FolderKanban size={15}/>연결 프로젝트</span><strong>{activeProjects.length}<small>개</small></strong></div>
    <div><span><Clock3 size={15}/>완료 보고가 있는 프로젝트</span><strong>{activeProjects.filter(p=>p.reportedComplete>0).length}<small>개</small></strong></div>
-   <div><span><CheckCheck size={15}/>검증 근거가 연결된 프로젝트</span><strong>{activeProjects.filter(p=>p.verified>0).length}<small>개</small></strong></div>
+   <div><span><CheckCheck size={15}/>검증 근거 연결</span><strong>{activeProjects.filter(p=>p.verified>0).length}<small>개</small></strong></div>
    <div><span><ShieldCheck size={15}/>확인 필요 프로젝트</span><strong>{activeProjects.filter(p=>p.blocked>0||p.sourceErrors?.length).length}<small>개</small></strong></div>
   </div>
   <section className="panel daily-panel" aria-labelledby="daily-title">

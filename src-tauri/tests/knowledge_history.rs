@@ -229,3 +229,75 @@ fn explicit_legacy_archive_survives_old_observation_cleanup() {
     assert_eq!(h["points"][0]["counts"]["reportedComplete"], 6);
     assert_eq!(h["points"][0]["coverage"], "legacyUnknown");
 }
+
+#[test]
+fn same_analysis_can_apply_history_then_basis() {
+    let (_dir, e, version) = fixture();
+    let k = e.knowledge();
+    let job = k
+        .create_analysis_job(json!({"projectId":"p","inputVersionIds":[version]}))
+        .unwrap();
+    let id = job["jobId"].as_str().unwrap();
+    let token = k.claim_analysis_job(id, "test").unwrap();
+    let doc = k.read_document_version(&version, 1, 30).unwrap();
+    let span =
+        json!({"versionId":version,"sha256":doc["sha256"],"locator":{"lines":{"start":1,"end":5}}});
+    let result=k.submit_analysis_result(id,token["leaseToken"].as_str().unwrap(),json!({"candidates":[
+        {"kind":"workEntry","workDate":"2026-01-13","sourceSpans":[span],"proposedChanges":{"text":"업무 기록"}},
+        {"kind":"basisDefinition","sourceSpans":[span],"proposedChanges":{"basisId":"new","version":1,"name":"검증 기준","kind":"acceptance","tasks":[{"taskId":"U1","title":"실기","revision":1,"state":"pending"}]}}
+    ]})).unwrap();
+    let entries = result["candidates"].as_array().unwrap();
+    let past = entries[0]["candidateId"].as_str().unwrap();
+    let basis = entries[1]["candidateId"].as_str().unwrap();
+    k.review_import_candidate(id, past, "accepted", None, "검토", 1)
+        .unwrap();
+    apply(&e, id, past, "history-part", "history");
+    let preview = k.get_import_preview(id).unwrap();
+    assert_eq!(preview["expectedProjectRevision"], 2);
+    assert_eq!(preview["candidates"][0]["applied"], true);
+    k.review_import_candidate(id, basis, "accepted", None, "검토", 2)
+        .unwrap();
+    apply(&e, id, basis, "basis-part", "basis");
+    assert_eq!(
+        k.get_project_progress("p", Some("new")).unwrap()["counts"]["total"],
+        1
+    );
+}
+
+#[test]
+fn restores_explicit_earlier_basis_without_changing_current_projection() {
+    let (_dir, e, version) = fixture();
+    let k = e.knowledge();
+    k.save_progress_basis(
+        json!({"basisId":"dev","version":2,"projectId":"p","name":"개발","kind":"development",
+        "tasks":[{"taskId":"T1","title":"현재 작업","revision":1,"state":"pending"}]}),
+        1,
+    )
+    .unwrap();
+    let job = k
+        .create_analysis_job(
+            json!({"projectId":"p","basisId":"dev","basisVersion":1,"inputVersionIds":[version]}),
+        )
+        .unwrap();
+    let id = job["jobId"].as_str().unwrap();
+    let claim = k.claim_analysis_job(id, "test").unwrap();
+    let doc = k.read_document_version(&version, 1, 200).unwrap();
+    let review=k.submit_analysis_result(id,claim["leaseToken"].as_str().unwrap(),json!({"candidates":[{
+        "kind":"historicalSnapshot","effectiveDate":"2026-01-13",
+        "sourceSpans":[{"versionId":version,"sha256":doc["sha256"],"locator":{"lines":{"start":1,"end":5}}}],
+        "proposedChanges":{"coverage":"complete","basisVersion":1,"tasks":[{"taskId":"T1","revision":1,"state":"reportedComplete"}]}
+    }]})).unwrap();
+    let candidate = review["candidates"][0]["candidateId"].as_str().unwrap();
+    k.review_import_candidate(id, candidate, "accepted", None, "과거 원문", 2)
+        .unwrap();
+    apply(&e, id, candidate, "old-version", "history");
+    let history = k
+        .get_project_history("p", "dev", "2026-01-01", "2026-01-31")
+        .unwrap();
+    assert_eq!(history["points"][0]["basisVersion"], 1);
+    assert_eq!(history["points"][0]["counts"]["reportedComplete"], 1);
+    assert_eq!(
+        k.get_project_progress("p", Some("dev")).unwrap()["counts"]["reportedComplete"],
+        0
+    );
+}

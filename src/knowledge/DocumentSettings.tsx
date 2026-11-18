@@ -7,6 +7,7 @@ import type {DocumentConfigView,DocumentSource,PublishTarget} from './contracts'
 import ReportSettings from './ReportSettings';
 const roles=[['handover','핸드오버'],['dailyLog','일자별 작업기록'],['checklist','기준 체크리스트'],['review','검토·검증 결과'],['reference','참고 문서'],['publicationReceipt','게시 영수증']];
 const states:Record<string,string>={online:'연결 정상',partial:'일부만 읽음',offline:'오프라인',denied:'접근 권한 없음',timeout:'연결 시간 초과',unknown:'아직 확인 전',error:'연결 확인 실패'};
+const receiptState:Record<string,string>={published_verified:'완료 영수증 일치',devdockPending:'DevDock 게시 확인 필요',pending_final_verification:'최종 영수증 대기',prepared:'기존 게시 준비 중',conflict:'배치표와 영수증 불일치',unsupported:'지원하지 않는 배치표',unverifiedReceipt:'완료 영수증 확인 필요',unknown:'확인 전'};
 const message=(e:unknown)=>String(e).replace(/^Error: /,'');
 const stamp=(v?:string)=>v?new Date(v).toLocaleString('ko-KR',{hour12:false}):'아직 확인 전';
 export default function DocumentSettings({api,projects,refreshVersion}:{api:KnowledgeApi;projects:Project[];refreshVersion:number}){
@@ -32,7 +33,7 @@ export default function DocumentSettings({api,projects,refreshVersion}:{api:Know
   {config.sources.filter(s=>!s.archived).map(s=>{const state=connection.find(v=>v.sourceId===s.sourceId);return <article className="document-source-row" key={s.sourceId}>
    <div className="document-source-heading"><FolderOpen size={18}/><strong>{s.scope==='global'?'공통 핸드오버·문서':projects.find(p=>p.id===s.projectId)?.name??'연결 프로젝트 확인 필요'}</strong><span className={'status-pill '+(state?.state==='online'?'good':state&&state.state!=='unknown'?'warn':'neutral')}>{s.enabled?states[state?.state??'unknown']??'확인 필요':'사용 중지'}</span></div>
    <div className="source-meta"><span>{s.location==='nas'?'NAS 작업기록':'로컬 문서'}</span><span>{s.roles.map(r=>roles.find(v=>v[0]===r)?.[1]??r).join(', ')}</span></div>
-   <details className="source-path"><summary>문서 위치와 자료 상태</summary><p>{s.root}</p><p>원문 확인 {stamp(state?.lastSuccessAt)}</p><p>자료 기준일은 개별 문서에서 확인합니다.</p>{state?.nextRetryAt&&state.state!=='online'&&<p>다음 연결 확인 {stamp(state.nextRetryAt)}</p>}</details>
+   <details className="source-path"><summary>문서 위치와 자료 상태</summary><p>{s.root}</p><p>원문 확인 {stamp(state?.lastSuccessAt)}</p><p>자료 기준일은 개별 문서에서 확인합니다.</p>{state?.publication&&<p>게시 원장 · {receiptState[state.publication.receiptState]??state.publication.receiptState} · 문서 집합 감사 전</p>}{state?.nextRetryAt&&state.state!=='online'&&<p>다음 연결 확인 {stamp(state.nextRetryAt)}</p>}</details>
    <div className="source-actions"><button type="button" className="subtle-button" disabled={probing!==null||!s.enabled} onClick={()=>void probe(s.sourceId)}><RefreshCw size={13} className={probing===s.sourceId?'spin':''}/>{probing===s.sourceId?'연결 확인 중':'연결 확인'}</button><button type="button" className="text-button" onClick={()=>edit(s)}>문서 연결 수정</button><button type="button" className="text-button" disabled={busy} onClick={()=>void act(()=>api.upsertSource({...s,enabled:!s.enabled},config.revision),s.enabled?'문서 자동 확인을 중지했습니다.':'문서 자동 확인을 다시 시작했습니다.')}>{s.enabled?'사용 중지':'다시 사용'}</button></div>
   </article>;})}
   {!config.sources.some(s=>!s.archived)&&<p className="small">연결한 폴더가 없습니다. 공통 핸드오버나 프로젝트 NAS 문서 폴더를 추가해 주세요.</p>}

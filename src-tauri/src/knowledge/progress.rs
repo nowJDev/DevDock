@@ -92,7 +92,15 @@ pub(crate) fn event(
     Ok(())
 }
 pub(crate) fn load_basis(c: &Connection, project: &str, id: &str) -> Result<Value> {
-    let (version,text):(i64,String)=c.query_row("SELECT version,payload FROM progress_bases WHERE project_id=?1 AND basis_id=?2 AND COALESCE(json_extract(payload,'$.inactive'),0)=0 ORDER BY version DESC LIMIT 1",params![project,id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
+    load_basis_version(c, project, id, None)
+}
+pub(crate) fn load_basis_version(
+    c: &Connection,
+    project: &str,
+    id: &str,
+    requested: Option<i64>,
+) -> Result<Value> {
+    let (version,text):(i64,String)=c.query_row("SELECT version,payload FROM progress_bases WHERE project_id=?1 AND basis_id=?2 AND (?3 IS NULL OR version=?3) AND COALESCE(json_extract(payload,'$.inactive'),0)=0 ORDER BY version DESC LIMIT 1",params![project,id,requested],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
     let mut basis: Value = serde_json::from_str(&text).map_err(err)?;
     let mut q = c
         .prepare("SELECT payload FROM basis_tasks WHERE basis_id=?1 AND version=?2 ORDER BY rowid")
@@ -301,7 +309,7 @@ impl KnowledgeService {
             .chain(task.source_span.clone())
             .collect();
         for span in spans {
-            let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND v.sha256=?2 AND l.project_id=?3 AND l.review_state='accepted' AND v.kind!='generatedPublication')",params![span.version_id,span.sha256,project],|r|r.get(0)).map_err(err)?;
+            let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM document_versions v JOIN document_project_links l USING(document_id) WHERE v.version_id=?1 AND v.sha256=?2 AND l.project_id=?3 AND l.review_state='accepted' AND v.kind!='generatedPublication' AND (l.method!='crossChecked' OR json_extract(v.payload,'$.crossCheckedProject')=l.project_id))",params![span.version_id,span.sha256,project],|r|r.get(0)).map_err(err)?;
             if !valid {
                 return Err("foreign evidence".into());
             }
@@ -392,9 +400,19 @@ impl KnowledgeService {
             .map_err(err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(err)?;
+        let mut versions=c.prepare("SELECT version FROM progress_bases WHERE project_id=?1 AND basis_id=?2 AND COALESCE(json_extract(payload,'$.inactive'),0)=0 ORDER BY version DESC").map_err(err)?;
         let bases = ids
             .iter()
-            .map(|id| load_basis(&c, project, id))
+            .map(|id| -> Result<Value> {
+                let mut basis = load_basis(&c, project, id)?;
+                let available = versions
+                    .query_map(params![project, id], |row| row.get::<_, i64>(0))
+                    .map_err(err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(err)?;
+                basis["versions"] = json!(available);
+                Ok(basis)
+            })
             .collect::<Result<Vec<_>>>()?;
         let selected = basis_id
             .or_else(|| ctl["defaultBasisId"].as_str())

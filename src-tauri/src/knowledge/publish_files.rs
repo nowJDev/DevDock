@@ -197,7 +197,13 @@ pub fn inspect(root: &Path, targets: &[Target]) -> Result<(Protocol, Vec<Prior>)
         return Err("이 공유 폴더에 진행 중이거나 복구가 필요한 DevDock 게시가 있습니다.".into());
     }
     let guide = read(&checked(root, GUIDE)?)?;
-    if !std::str::from_utf8(&guide).map_err(err)?.contains("1.3.0") {
+    let declarations: Vec<_> = std::str::from_utf8(&guide)
+        .map_err(err)?
+        .lines()
+        .take(12)
+        .filter_map(|line| line.trim().strip_prefix("- 지침 버전. "))
+        .collect();
+    if declarations != ["1.3.0."] {
         return Err("지원하는 NAS 문서 규약 v1.3.0을 확인할 수 없습니다.".into());
     }
     let map_bytes = read(&checked(root, MAP)?)?;
@@ -415,11 +421,13 @@ pub fn restore(
     root: &Path,
     stage: &Path,
     run: &str,
+    protocol: &Protocol,
     files: &[FileChange],
     selected: &[String],
     paths: &[String],
 ) -> Result<RunResult> {
     ordinary(root, true)?;
+    recheck_protocol(root, protocol)?;
     let mut journal: RunResult =
         serde_json::from_slice(&read(&stage.join("status.json"))?).map_err(err)?;
     if paths.is_empty() || paths.iter().any(|p| !selected.contains(p)) {
@@ -430,6 +438,10 @@ pub fn restore(
         create(&lock, run.as_bytes())?;
     }
     owned_lock(&lock, run)?;
+    let was_fully_published = matches!(
+        journal.state.as_str(),
+        "filesVerified" | "partiallyRestored" | "restoreConflicts"
+    );
     journal.state = "restoring".into();
     save_result(stage, &journal)?;
     for (i, path) in selected.iter().enumerate() {
@@ -437,6 +449,8 @@ pub fn restore(
             continue;
         }
         let result = (|| {
+            owned_lock(&lock, run)?;
+            recheck_protocol(root, protocol)?;
             let file = files
                 .iter()
                 .find(|f| f.path == *path)
@@ -444,10 +458,10 @@ pub fn restore(
             let target = checked(root, path)?;
             let current = sha256(&read(&target)?);
             if current == file.before {
-                return Ok(());
+                return Ok(true);
             }
             if current != file.after {
-                return Err("게시 이후의 수동 수정이 있어 보존했습니다.".into());
+                return Ok(false);
             }
             let backup = read(&stage.join(format!("before-{i}.md")))?;
             if sha256(&backup) != file.before {
@@ -457,7 +471,7 @@ pub fn restore(
             if sha256(&read(&target)?) != file.before {
                 return Err("복구 결과 해시가 일치하지 않습니다.".into());
             }
-            Ok(())
+            Ok(true)
         })();
         let item = journal
             .files
@@ -465,12 +479,16 @@ pub fn restore(
             .find(|f| f.path == *path)
             .ok_or("복구 원장이 손상되었습니다.")?;
         match result {
-            Ok(()) => {
+            Ok(true) => {
                 item.state = "restored".into();
                 item.message = None;
             }
-            Err(error) => {
+            Ok(false) => {
                 item.state = "conflict".into();
+                item.message = Some("게시 이후의 수동 수정이 있어 보존했습니다.".into());
+            }
+            Err(error) => {
+                item.state = "uncertain".into();
                 item.message = Some(error);
             }
         }
@@ -481,12 +499,17 @@ pub fn restore(
         save_result(stage, &journal)?;
         owned_lock(&lock, run)?;
         fs::remove_file(lock).map_err(err)?;
-    } else if journal
-        .files
-        .iter()
-        .all(|f| f.state == "restored" || f.state == "conflict")
-    {
-        journal.state = "restoreConflicts".into();
+    } else if journal.files.iter().all(|f| {
+        f.state == "restored"
+            || f.state == "conflict"
+            || (was_fully_published && f.state == "verified")
+    }) {
+        journal.state = if journal.files.iter().any(|f| f.state == "conflict") {
+            "restoreConflicts"
+        } else {
+            "partiallyRestored"
+        }
+        .into();
         save_result(stage, &journal)?;
         owned_lock(&lock, run)?;
         fs::remove_file(lock).map_err(err)?;
@@ -517,4 +540,31 @@ pub fn result(path: &Path) -> Result<Value> {
         return Ok(json!({"state":"unknown","files":[]}));
     }
     json_bytes(&read(path)?)
+}
+
+// 배치표와 동일 실행 영수증의 표기를 읽고 문서 전체 감사 여부와 구분한다.
+pub fn receipt_status(root: &Path) -> Value {
+    if !absent(&root.join(LOCK)).unwrap_or(true) {
+        return json!({"receiptState":"devdockPending","fullAudit":false});
+    }
+    let load = || -> Result<Value> {
+        let map = json_bytes(&read(&checked(root, MAP)?)?)?;
+        if map["schema_version"] != 3 {
+            return Ok(json!({"receiptState":"unsupported","fullAudit":false}));
+        }
+        let path = map["completion_receipt"].as_str().unwrap_or(RECEIPT);
+        let completion = checked(root, path)
+            .and_then(|file| read(&file))
+            .and_then(|bytes| json_bytes(&bytes))
+            .ok();
+        let valid = completion
+            .as_ref()
+            .filter(|receipt| receipt["schema_version"] == 5);
+        let mut metadata = super::parser::publication_metadata(&map, valid);
+        if valid.is_none() && metadata["receiptState"] == "published_verified" {
+            metadata["receiptState"] = json!("unverifiedReceipt");
+        }
+        Ok(metadata)
+    };
+    load().unwrap_or(json!({"receiptState":"unknown","fullAudit":false}))
 }

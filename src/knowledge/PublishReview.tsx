@@ -16,7 +16,7 @@ type Run={
 const roleLabels:Record<string,string>={checklist:'진행 체크리스트',dailyLog:'일자별 작업기록',status:'현재 상태',index:'문서 안내'};
 const stateLabels:Record<string,string>={
   previewReady:'게시 미리보기',applying:'게시 중',filesVerified:'선택 파일 확인',
-  recoveryRequired:'복구 확인 필요',restoreConflicts:'후속 수정 보존',restoring:'복구 중',restored:'복구 확인',failed:'실행 중단',
+  recoveryRequired:'복구 확인 필요',restoreConflicts:'후속 수정 보존',partiallyRestored:'선택 복구 확인',restoring:'복구 중',restored:'복구 확인',failed:'실행 중단',
   verified:'새 파일 확인',restoredFile:'이전본 확인',pending:'대기',uncertain:'확인 필요',conflict:'충돌',
   reportedComplete:'완료 보고',inProgress:'진행 중',blocked:'막힘',
 };
@@ -195,7 +195,7 @@ export default function PublishReview({api,project,sources,defaultSourceId,opene
         </div>)}
         <div className="knowledge-actions">
           {run.state==='previewReady'&&!confirm&&<button className="primary-button" disabled={busy||!selected.length} onClick={()=>setConfirm('apply')}>선택 파일 게시</button>}
-          {['filesVerified','recoveryRequired','restoreConflicts'].includes(run.state)&&!confirm&&
+          {['filesVerified','recoveryRequired','restoreConflicts','partiallyRestored'].includes(run.state)&&!confirm&&
             <button className="subtle-button" disabled={busy||!selected.length} onClick={()=>setConfirm('restore')}>선택 파일 복구</button>}
           {!confirm&&<button className="subtle-button" disabled={busy} onClick={()=>setRun(null)}>게시 기록으로</button>}
         </div>

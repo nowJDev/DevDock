@@ -280,12 +280,30 @@ pub fn run_scan_worker(request_path: &Path) -> Result<()> {
             force: request["force"] == true,
         };
         w.walk(root, 0);
-        sources.push(json!({"sourceId":source["sourceId"],"state":if w.errors.is_empty(){"online"}else{"partial"},"files":w.files,"errors":w.errors,"checkedAt":now()}));
+        let publication = if source["location"] == "nas" {
+            super::publish_files::receipt_status(root)
+        } else {
+            Value::Null
+        };
+        sources.push(json!({"sourceId":source["sourceId"],"state":if w.errors.is_empty(){"online"}else{"partial"},"files":w.files,"errors":w.errors,"checkedAt":now(),"publication":publication}));
     }
     write_json(
         &stage.join("result.json"),
         &json!({"jobId":request["jobId"],"revision":request["revision"],"sources":sources}),
     )
+}
+struct ScanStage(PathBuf);
+impl Drop for ScanStage {
+    fn drop(&mut self) {
+        if let Ok(files) = fs::read_dir(&self.0) {
+            for entry in files.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        let _ = fs::remove_dir(&self.0);
+    }
 }
 struct ScanLock {
     path: PathBuf,
@@ -362,7 +380,7 @@ impl KnowledgeService {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(err)?;
-        let mut q=tx.prepare("SELECT v.version_id,v.cache_path FROM document_versions v WHERE julianday(v.captured_at)<julianday('now','-30 days') AND NOT EXISTS(SELECT 1 FROM document_version_pins p WHERE p.version_id=v.version_id) AND NOT EXISTS(SELECT 1 FROM import_batch_items i WHERE i.version_id=v.version_id) AND EXISTS(SELECT 1 FROM document_versions newer WHERE newer.document_id=v.document_id AND julianday(newer.captured_at)>julianday(v.captured_at))").map_err(err)?;
+        let mut q=tx.prepare("SELECT v.version_id,v.cache_path FROM document_versions v WHERE julianday(v.captured_at)<julianday('now','-30 days') AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.document_id=v.document_id AND json_extract(d.payload,'$.sha256')=v.sha256) AND NOT EXISTS(SELECT 1 FROM document_version_pins p WHERE p.version_id=v.version_id) AND NOT EXISTS(SELECT 1 FROM import_batch_items i WHERE i.version_id=v.version_id) AND EXISTS(SELECT 1 FROM document_versions newer WHERE newer.document_id=v.document_id AND julianday(newer.captured_at)>julianday(v.captured_at))").map_err(err)?;
         let rows = q
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(err)?
@@ -394,20 +412,38 @@ impl KnowledgeService {
             }
         }
         let cache = self.engine.data_dir().join("document-cache");
-        let mut orphaned=0;
-        if let Ok(entries)=fs::read_dir(cache) {
+        let mut orphaned = 0;
+        if let Ok(entries) = fs::read_dir(cache) {
             for entry in entries.flatten() {
-                let name=entry.file_name();
-                let Some(name)=name.to_str() else{continue;};
-                if name.len()!=64 || !name.bytes().all(|byte|byte.is_ascii_hexdigit()) {continue;}
-                if !entry.file_type().is_ok_and(|kind|kind.is_file()) {continue;}
-                let old=entry.metadata().and_then(|info|info.modified()).ok()
-                    .and_then(|time|time.elapsed().ok()).is_some_and(|age|age.as_secs()>30*86400);
-                if !old {continue;}
-                let referenced:bool=c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM document_versions WHERE sha256=?1)",[name],|row|row.get(0),
-                ).map_err(err)?;
-                if !referenced && fs::remove_file(entry.path()).is_ok() {orphaned+=1;}
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    continue;
+                }
+                if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                let old = entry
+                    .metadata()
+                    .and_then(|info| info.modified())
+                    .ok()
+                    .and_then(|time| time.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > 30 * 86400);
+                if !old {
+                    continue;
+                }
+                let referenced: bool = c
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM document_versions WHERE sha256=?1)",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .map_err(err)?;
+                if !referenced && fs::remove_file(entry.path()).is_ok() {
+                    orphaned += 1;
+                }
             }
         }
         Ok(json!({"removed":removed,"orphaned":orphaned}))
@@ -450,7 +486,7 @@ impl KnowledgeService {
             let handles:Vec<_>=["local","nas"].iter().map(|location|{let subset:Vec<_>=sources.iter().filter(|s|s["location"]==*location).cloned().collect();let cfg=&cfg;let job=&job;scope.spawn(move||->Result<Vec<Value>>{
         if subset.is_empty(){return Ok(vec![])}let _lock=acquire(self.engine.data_dir(),location)?;let mut result=vec![];
         for s in subset {
-          let stage=self.engine.data_dir().join("document-staging").join(Uuid::new_v4().to_string());fs::create_dir_all(&stage).map_err(err)?;
+          let stage=self.engine.data_dir().join("document-staging").join(Uuid::new_v4().to_string());fs::create_dir_all(&stage).map_err(err)?;let _cleanup=ScanStage(stage.clone());
           let mut known=json!({});let c=self.db()?;let mut q=c.prepare("SELECT normalized_path,payload FROM documents WHERE source_id=?1").map_err(err)?;
           for row in q.query_map([s["sourceId"].as_str().unwrap()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(err)? {let(p,v)=row.map_err(err)?;let mut v:Value=serde_json::from_str(&v).map_err(err)?;let key=v["path"].as_str().unwrap_or(&p).to_owned();known[s["sourceId"].as_str().unwrap()][key]=v.take();}
           drop(q);drop(c);
@@ -459,11 +495,10 @@ impl KnowledgeService {
           let request=json!({"jobId":job,"revision":cfg["revision"],"sources":[s],"known":known,"force":rehash});write_json(&stage.join("request.json"),&request)?;
           let mut cmd=Command::new(executable);cmd.arg("--document-scan-worker").arg(stage.join("request.json"));
           match run_bounded(cmd,timeout) {
-             Ok(())=>{let v=read_json(&stage.join("result.json"))?;if v["jobId"]!=*job{return Err("scan job mismatch".into())}self.ingest_scan_result(v.clone(),&stage)?;if rehash{self.update_source_state(s["sourceId"].as_str().unwrap(),None,Some(now()))?;}result.extend(v["sources"].as_array().unwrap().iter().cloned());},
+             Ok(())=>{let v=read_json(&stage.join("result.json"))?;if v["jobId"]!=*job{return Err("scan job mismatch".into())}if let Err(error)=self.ingest_scan_result(v.clone(),&stage){if error!="scan_config_conflict"{self.update_source_state(s["sourceId"].as_str().unwrap(),Some(json!({"state":"error","error":error,"checkedAt":now()})),None)?;}return Err(error);}if rehash{self.update_source_state(s["sourceId"].as_str().unwrap(),None,Some(now()))?;}result.extend(v["sources"].as_array().unwrap().iter().cloned());},
              Err(error)=>{let state=if error.contains("timeout"){"timeout"}else{"error"};self.update_source_state(s["sourceId"].as_str().unwrap(),Some(json!({"state":state,"error":error,"checkedAt":now()})),None)?;result.push(json!({"sourceId":s["sourceId"],"state":state}));}
           }
-          // staging에는 이번 worker가 만든 개별 파일만 존재한다. 다른 캐시·문서에는 접근하지 않는다.
-          if let Ok(entries)=fs::read_dir(&stage){for item in entries.flatten(){if item.file_type().is_ok_and(|t|t.is_file()){let _=fs::remove_file(item.path());}}}let _=fs::remove_dir(&stage);
+
         }Ok(result)
       })}).collect();
             handles
@@ -568,6 +603,23 @@ impl KnowledgeService {
             tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,normalized_path) DO UPDATE SET payload=excluded.payload",params![id,sid,normalized,f.to_string()]).map_err(err)?;
             let hash = f["sha256"].as_str().unwrap();
             let body = fs::read_to_string(&target).map_err(err)?;
+            let owner = if source["scope"] == "global" {
+                let registry = self.engine.registry()?;
+                let full = Path::new(source["root"].as_str().ok_or("source root missing")?)
+                    .join(relative_path(path)?);
+                let projects = super::parser::match_projects(
+                    &full.to_string_lossy(),
+                    &body,
+                    registry["projects"].as_array().unwrap(),
+                );
+                if projects.len() == 1 {
+                    Some(projects[0].clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let kind = if super::publish_files::generated(&body) {
                 "generatedPublication"
             } else if path.ends_with(".json") {
@@ -587,7 +639,7 @@ impl KnowledgeService {
                     f["bytes"].as_i64().ok_or("invalid bytes")?,
                     now(),
                     kind,
-                    json!({"sourceId":sid,"path":path}).to_string()
+                    json!({"sourceId":sid,"path":path,"crossCheckedProject":owner}).to_string()
                 ],
             )
             .map_err(err)?;
@@ -595,11 +647,14 @@ impl KnowledgeService {
                 self.require_project(project)?;
                 tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'source','accepted')",params![id,project]).map_err(err)?;
             } else if source["scope"] == "global" {
-                let reg = self.engine.registry()?;
-                let projects =
-                    super::parser::match_projects(path, &body, reg["projects"].as_array().unwrap());
-                if projects.len() == 1 {
-                    tx.execute("INSERT OR IGNORE INTO document_project_links VALUES(?1,?2,'crossChecked','accepted')",params![id,projects[0]]).map_err(err)?;
+                tx.execute("UPDATE document_versions SET payload=json_set(payload,'$.crossCheckedProject',?1) WHERE document_id=?2 AND sha256=?3",
+                    params![owner,id,hash]).map_err(err)?;
+                tx.execute("UPDATE document_project_links SET review_state='rejected' WHERE document_id=?1 AND method='crossChecked' AND project_id IS NOT ?2",
+                    params![id,owner]).map_err(err)?;
+                if let Some(project) = owner {
+                    tx.execute("INSERT INTO document_project_links VALUES(?1,?2,'crossChecked','accepted')
+                        ON CONFLICT(document_id,project_id) DO UPDATE SET review_state='accepted' WHERE method='crossChecked'",
+                        params![id,project]).map_err(err)?;
                 }
             }
         }
@@ -639,6 +694,9 @@ impl KnowledgeService {
                 .get("errors")
                 .cloned()
                 .unwrap_or_else(|| json!([v["error"]]));
+            if v["publication"].is_object() {
+                state["publication"] = v["publication"].clone();
+            }
             if v["state"] == "online" {
                 state["lastSuccessAt"] = v["checkedAt"].clone();
                 state["failures"] = json!(0);
@@ -672,7 +730,7 @@ impl KnowledgeService {
     pub fn list_project_documents(&self, project: &str, page: u32) -> Result<Value> {
         self.require_project(project)?;
         let c = self.db()?;
-        let mut q=c.prepare("SELECT v.version_id,v.document_id,d.source_id,json_extract(v.payload,'$.path'),v.sha256,v.bytes,v.captured_at,v.kind FROM document_versions v JOIN documents d USING(document_id) JOIN document_project_links l USING(document_id) WHERE l.project_id=?1 AND l.review_state='accepted' ORDER BY v.captured_at DESC,v.version_id LIMIT 100 OFFSET ?2").map_err(err)?;
+        let mut q=c.prepare("SELECT v.version_id,v.document_id,d.source_id,json_extract(v.payload,'$.path'),v.sha256,v.bytes,v.captured_at,v.kind FROM document_versions v JOIN documents d USING(document_id) JOIN document_project_links l USING(document_id) WHERE l.project_id=?1 AND l.review_state='accepted' AND (l.method!='crossChecked' OR json_extract(v.payload,'$.crossCheckedProject')=l.project_id) ORDER BY (v.sha256=json_extract(d.payload,'$.sha256')) DESC,v.captured_at DESC,v.version_id LIMIT 100 OFFSET ?2").map_err(err)?;
         let rows=q.query_map(params![project,i64::from(page)*100],|r|Ok(json!({"versionId":r.get::<_,String>(0)?,"documentId":r.get::<_,String>(1)?,"sourceId":r.get::<_,String>(2)?,"path":r.get::<_,String>(3)?,"sha256":r.get::<_,String>(4)?,"bytes":r.get::<_,i64>(5)?,"capturedAt":r.get::<_,String>(6)?,"kind":r.get::<_,String>(7)?}))).map_err(err)?.collect::<std::result::Result<Vec<_>,_>>().map_err(err)?;
         Ok(json!({"documents":rows,"page":page,"pageSize":100}))
     }

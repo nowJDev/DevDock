@@ -214,7 +214,11 @@ impl KnowledgeService {
                 }
                 ("history", "historicalSnapshot") => {
                     let basis_id = job["basisId"].as_str().ok_or("snapshot requires basis")?;
-                    let basis = progress::load_basis(&tx, project, basis_id)?;
+                    let version = job["basisVersion"]
+                        .as_i64()
+                        .ok_or("snapshot basis version required")?;
+                    let basis =
+                        progress::load_basis_version(&tx, project, basis_id, Some(version))?;
                     if changes["coverage"] != "complete"
                         || changes["basisVersion"] != basis["version"]
                         || basis["version"] != job["basisVersion"]
@@ -249,11 +253,15 @@ impl KnowledgeService {
                             .iter_mut()
                             .find(|t| t["taskId"] == task_id)
                             .ok_or("unknown snapshot task")?;
-                        if task["revision"] != state["revision"]
+                        let known_revision=state["revision"].as_i64().is_some_and(|seen| task["revision"]==seen) ||
+                            tx.query_row("SELECT EXISTS(SELECT 1 FROM basis_task_events WHERE basis_id=?1 AND version=?2 AND task_id=?3 AND active=1 AND json_extract(payload,'$.revision')=?4) OR EXISTS(SELECT 1 FROM progress_bases, json_each(progress_bases.payload,'$.tasks') WHERE basis_id=?1 AND version=?2 AND json_extract(value,'$.taskId')=?3 AND json_extract(value,'$.revision')=?4)",
+                                params![basis_id,version,task_id,state["revision"].as_i64()],|row|row.get::<_,bool>(0)).map_err(err)?;
+                        if !known_revision
                             || !progress::valid_state(state["state"].as_str().unwrap_or(""))
                         {
                             return Err("snapshot revision or state conflict".into());
                         }
+                        task["revision"] = state["revision"].clone();
                         task["state"] = state["state"].clone();
                         task["verificationEvidence"] = state
                             .get("verificationEvidence")
@@ -364,6 +372,9 @@ impl KnowledgeService {
         )
         .map_err(err)?;
         progress::bump(&tx, project, selection.expected_project_revision)?;
+        // This job advanced the revision itself; remaining candidates still use the same inputs.
+        tx.execute("UPDATE analysis_jobs SET payload=json_set(payload,'$.expectedProjectRevision',?1) WHERE job_id=?2",
+            params![selection.expected_project_revision+1,selection.job_id]).map_err(err)?;
         tx.commit().map_err(err)?;
         Ok(json!({"batchId":batch_id,"active":true,"applied":seen.len()}))
     }

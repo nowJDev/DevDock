@@ -116,3 +116,21 @@ fn shared_handover_source_links_only_cross_checked_project() {
             .is_empty()
     );
 }
+
+#[test]
+fn markdown_and_json_preserve_parent_progress_and_acceptance_kind() {
+    let markdown = parse_document(
+        "v",
+        "hash",
+        "- [ ] UAT-01 상위\n  - [x] UAT-02 실제 검증\n",
+        "check.md",
+    )
+    .unwrap();
+    let basis = &markdown[0]["proposedChanges"];
+    assert_eq!(basis["kind"], "acceptance");
+    assert_eq!(basis["tasks"][1]["parentId"], "UAT-01");
+    assert_eq!(devdock_core::knowledge::progress::counts(basis)["total"], 1);
+    let input = json!({"tasks":[{"id":"P","title":"상위","state":"pending"},{"id":"C","title":"하위","state":"reportedComplete","parentId":"P"}]});
+    let json = parse_document("v", "hash", &input.to_string(), "state.json").unwrap();
+    assert_eq!(json[0]["proposedChanges"]["tasks"][1]["parentId"], "P");
+}
