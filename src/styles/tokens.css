@@ -29,6 +29,15 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 nav button svg,.metrics svg,.project-row-end svg,.section-heading>svg{flex:none}
 .section-heading>div,.section-heading h2,.task-list li>span:not(.task-dot),.task-list small,.event>div,.modal{min-width:0;overflow-wrap:anywhere}
 .daily-panel,.project-panel,.overview-operations{margin-bottom:16px}
+.operations-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr)) minmax(0,1.8fr);margin-bottom:14px;border:1px solid var(--border);border-radius:8px;background:var(--panel)}
+.operations-summary-item{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0;padding:9px 12px}
+.operations-summary-item+.operations-summary-item{border-inline-start:1px solid var(--border)}
+.operations-summary-item>svg{color:var(--accent);flex:none}
+.operations-summary-item strong{font-size:12px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.operations-summary-times{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.project-row[aria-expanded="true"]{background:#263954;box-shadow:inset 3px 0 var(--accent)}
+#project-detail-title{scroll-margin-block-start:18px}
+#project-detail-title:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:2px}
 .daily-controls{display:flex;align-items:center;gap:8px;flex:0 1 46%}
 .daily-controls select:first-child{flex:1;min-width:0;text-overflow:ellipsis}
 .daily-controls select:last-child{flex:none}

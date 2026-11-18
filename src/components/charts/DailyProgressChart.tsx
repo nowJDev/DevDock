@@ -19,9 +19,9 @@ interface MountedChart {
 }
 
 const metrics = [
-  {key: 'total', label: '전체 작업', color: '#A7B5C9', symbol: 'circle', symbolSize: 13, lineType: 'solid'},
-  {key: 'verified', label: '검증 완료', color: '#62B5FF', symbol: 'diamond', symbolSize: 9, lineType: 'dashed'},
-  {key: 'reportedComplete', label: '미검증 완료 보고', color: '#FFB454', symbol: 'triangle', symbolSize: 6, lineType: 'dotted'},
+  {key: 'total', label: '전체 작업', color: '#A7B5C9', symbolSize: 13, lineType: 'solid'},
+  {key: 'verified', label: '검증 완료', color: '#62B5FF', symbolSize: 9, lineType: 'dashed'},
+  {key: 'reportedComplete', label: '미검증 완료 보고', color: '#FFB454', symbolSize: 6, lineType: 'dotted'},
 ] as const;
 
 const chartOptions = {
@@ -29,7 +29,12 @@ const chartOptions = {
   backgroundColor: '#141E2C',
   color: metrics.map(metric => metric.color),
   grid: {top: 44, right: 24, bottom: 34, left: 48, outerBoundsMode: 'same'},
-  legend: {top: 8, textStyle: {color: '#D4DFEE', fontSize: 12}},
+  legend: {
+    top: 8,
+    // 계열 범례에는 선만 표시하고 점 모양은 기록 출처에 사용합니다.
+    itemStyle: {opacity: 0},
+    textStyle: {color: '#D4DFEE', fontSize: 12},
+  },
   tooltip: {
     trigger: 'axis',
     confine: true,
@@ -157,7 +162,7 @@ export default function DailyProgressChart({points, days, today, projectName,pro
           ...options.series[index],
           name: metric.label,
           type: 'line',
-          symbol: metric.symbol,
+          symbol: 'circle',
           symbolSize: metric.symbolSize,
           showAllSymbol: true,
           connectNulls: false,

@@ -37,3 +37,45 @@
   .project-actions { justify-content:flex-start; padding-inline:15px; }
   .publish-target,.modal .knowledge-fields { grid-template-columns:minmax(0,1fr); }
 }
+
+.modal.report-dialog {
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.modal.report-dialog > header {
+  flex:none;
+  margin-bottom:12px;
+}
+.report-dialog > .alert,.report-dialog > .knowledge-status {
+  flex:none;
+  max-height:20vh;
+  overflow:auto;
+  overflow-wrap:anywhere;
+}
+.report-dialog .report-dialog-body {
+  min-height:0;
+  overflow:auto;
+  padding:3px 4px;
+}
+.report-dialog .report-document-picker {
+  display:block;
+  min-width:0;
+  margin:0;
+}
+.report-document-list {
+  max-height:clamp(100px,24vh,220px);
+  overflow:auto;
+  padding:3px 4px;
+}
+.report-document-list:focus-visible {
+  outline:2px solid var(--accent);
+  outline-offset:-2px;
+}
+.report-dialog .report-request-actions {
+  flex:none;
+  gap:12px;
+  margin-top:10px;
+  padding-top:12px;
+  border-top:1px solid var(--border);
+}

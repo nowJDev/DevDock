@@ -1,5 +1,5 @@
 // 선택한 원문으로 Codex 보고를 요청하고 초안의 검토와 로컬 저장을 제공한다.
-import {useEffect,useState,type FormEvent} from 'react';
+import {useEffect,useId,useState,type FormEvent} from 'react';
 import Dialog from '../components/Dialog';
 import type {Project} from '../contracts';
 import type {KnowledgeApi} from './api';
@@ -33,6 +33,8 @@ const classifications:Record<string,string>={
 export default function DailyReport({api,project,returnFocus,onClose,initialRequest}:{
   api:KnowledgeApi;project:Pick<Project,'id'|'name'>;returnFocus:HTMLElement|null;onClose:()=>void;initialRequest?:Request;
 }){
+  const formId=useId();
+  const documentListId=useId();
   const [profile,setProfile]=useState<ReportProfile|null>(null);
   const [sources,setSources]=useState<DocumentSource[]>([]),[docs,setDocs]=useState<DocumentVersion[]>([]);
   const [date,setDate]=useState(currentDate),[heading,setHeading]=useState('');
@@ -106,10 +108,10 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
     setRequest(undefined);setResult(null);setBody('');setChecked(null);setSavePreview(null);setNotice('');setError('');
   }
   const handoff=request&&'DevDock 일일보고 요청 '+request.requestId+' (작업 '+request.jobId+'). devdock-cli reports context로 요청과 daily-work-report 규칙을 읽고, reports claim과 reports read-source로 선택 자료 전체를 읽어 주세요. 결과와 읽기 증명은 reports submit --stdin 으로 제출해 주세요.';
-  return <Dialog title={'일일보고 · '+project.name} wide returnFocus={returnFocus} onClose={onClose}>
+  return <Dialog title={'일일보고 · '+project.name} wide className="report-dialog" returnFocus={returnFocus} onClose={onClose}>
     {error&&<p className="alert error" role="alert">{error}</p>}
     {notice&&<p className="knowledge-status" role="status">{notice}</p>}
-    {!request&&profile&&<form className="knowledge-content" onSubmit={create}>
+    {!request&&profile&&<form id={formId} className="knowledge-content report-dialog-body" onSubmit={create}>
       {recent.length>0&&<details className="source-path"><summary>이전 보고 요청</summary>
         {recent.map(item=><div className="analysis-job" key={item.requestId}>
           <span>{new Date(item.createdAt).toLocaleString('ko-KR')}<small>{item.requestId}</small></span>
@@ -124,14 +126,16 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
         <option value="default">기본 · 10~12줄</option><option value="custom">사용자 지정</option>
       </select></label>
       {mode==='custom'&&<label className="field">사용자 지정 양식<textarea maxLength={12000} rows={4} value={custom} onChange={e=>setCustom(e.target.value)}/></label>}
-      <fieldset className="document-roles">
-        <legend>보고에 사용할 문서</legend>
+      <fieldset className="document-roles report-document-picker">
+        <legend id={documentListId}>보고에 사용할 문서</legend>
         {!files.length&&<p className="small">연결한 Markdown·텍스트 문서가 없습니다.</p>}
-        {files.map(d=><label className="candidate-select" key={d.versionId}>
-          <input type="checkbox" checked={selected.includes(d.versionId)} onChange={e=>{
-            setSelected(previous=>e.target.checked?[...previous,d.versionId]:previous.filter(id=>id!==d.versionId));
-          }}/><span>{d.path}</span>
-        </label>)}
+        {files.length>0&&<div className="report-document-list" role="region" aria-labelledby={documentListId} tabIndex={0}>
+          {files.map(d=><label className="candidate-select" key={d.versionId}>
+            <input type="checkbox" checked={selected.includes(d.versionId)} onChange={e=>{
+              setSelected(previous=>e.target.checked?[...previous,d.versionId]:previous.filter(id=>id!==d.versionId));
+            }}/><span>{d.path}</span>
+          </label>)}
+        </div>}
       </fieldset>
       {more&&<button className="subtle-button" type="button" disabled={busy} onClick={()=>void run(async()=>{
         const next=await api.documents(project.id,page+1);
@@ -139,12 +143,9 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
       })}>문서 더 보기</button>}
       <label className="field">추가 원문 파일<textarea rows={2} placeholder="md 또는 txt 파일의 전체 경로, 한 줄에 하나" value={extraPaths} onChange={e=>setExtraPaths(e.target.value)}/></label>
       {typed.length>0&&<label className="candidate-select"><input type="checkbox" checked={crossProject} onChange={e=>setCrossProject(e.target.checked)}/>입력한 경로에 다른 프로젝트 자료 포함 허용</label>}
-      <div className="knowledge-actions"><span className="small">선택 {count}개 / 최대 16개</span>
-        <button className="primary-button" disabled={busy||count<1||count>16}>Codex 보고 요청</button>
-      </div>
     </form>}
     {!request&&!profile&&!error&&<p role="status">보고 설정을 불러오는 중입니다.</p>}
-    {request&&<div className="knowledge-content">
+    {request&&<div className="knowledge-content report-dialog-body">
       <p className="small source-path">요청 ID <strong>{request.requestId}</strong></p>
       {!result?.draft&&<p role="status">{result?.state==='resultExpired'?'이전 초안이 만료되었습니다.':result?.state==='claimed'?'Codex가 자료를 분석 중입니다.':result?.state==='failed'?'보고 작성에 실패했습니다.':'요청 ID를 현재 Codex에 전달해 주세요.'}</p>}
       <div className="knowledge-actions">
@@ -185,5 +186,9 @@ export default function DailyReport({api,project,returnFocus,onClose,initialRequ
         </form>
       </>}
     </div>}
+    {!request&&profile&&<footer className="knowledge-actions report-request-actions">
+      <span className="small">선택 {count}개 / 최대 16개</span>
+      <button className="primary-button" type="submit" form={formId} disabled={busy||count<1||count>16}>Codex 보고 요청</button>
+    </footer>}
   </Dialog>;
 }

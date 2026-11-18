@@ -162,6 +162,36 @@ describe('DailyProgressChart', () => {
     expect(instance.isDisposed()).toBe(true);
   });
 
+  it('renders line-only metric swatches and keeps point shapes tied to the source of the record', async () => {
+    const echarts = await vi.importActual<typeof import('echarts')>('echarts');
+    echarts.setPlatformAPI({measureText: text => ({width: text.length * 8})});
+    const instance = echarts.init(null, undefined, {renderer: 'svg', ssr: true, width: 640, height: 260});
+    chart.init.mockReturnValue(instance);
+    const points = [
+      point('2026-03-08', {origin: 'observed'}),
+      point('2026-03-09', {origin: 'reconstructed'}),
+      point(today, {origin: 'correction'}),
+    ];
+    render(<DailyProgressChart points={points} days={3} today={today} projectName="DevDock" provenance/>);
+
+    await waitFor(() => expect(instance.getOption()).toMatchObject({
+      series: [4, 1, 2].map(value => expect.objectContaining({
+        data: ['circle', 'diamond', 'triangle'].map(symbol => expect.objectContaining({value, symbol})),
+      })),
+    }));
+    const svg = new DOMParser().parseFromString(instance.renderToSVGString(), 'image/svg+xml');
+    const legendPositions = new Set([...svg.querySelectorAll('[ecmeta_ssr_type="legend"]')]
+      .map(hitArea => hitArea.getAttribute('transform')));
+    const visibleSwatches = [...svg.querySelectorAll('path[transform]')].filter(path =>
+      legendPositions.has(path.getAttribute('transform')) &&
+      !path.hasAttribute('ecmeta_ssr_type') &&
+      path.getAttribute('fill-opacity') !== '0',
+    );
+    expect(visibleSwatches).toHaveLength(3);
+    expect(visibleSwatches.every(swatch => swatch.hasAttribute('stroke'))).toBe(true);
+    expect(new Set(visibleSwatches.map(swatch => swatch.getAttribute('stroke-dasharray'))).size).toBe(3);
+  });
+
   it('shows historical collection bases and warns only when known bases differ in the selected period', async () => {
     const user = userEvent.setup();
     const samplePoints = [

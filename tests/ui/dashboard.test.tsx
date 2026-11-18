@@ -21,6 +21,42 @@ function fixture() {
  return {snapshot,api,listeners,changeRegistry:()=>{registry={...registry,revision:registry.revision+1};}};
 }
 describe('DevDock dashboard',()=>{
+ it('shows fresh daemon and attendance status before the chart',async()=>{
+  const {api,snapshot}=fixture();
+  snapshot.daemons[0]={...snapshot.daemons[0],transportState:'healthy',freshness:'stale'};
+  snapshot.daemons.push({...snapshot.daemons[0],id:'B',name:'B daemon',transportState:'slow',freshness:'fresh'});
+  snapshot.attendance.checkInTime='08:15';
+  render(<App api={api}/>);
+  const summary=await screen.findByRole('region',{name:'데몬·근태 요약'});
+  expect(summary).toHaveTextContent('A daemon');
+  expect(summary).toHaveTextContent('확인 불가');
+  expect(summary).toHaveTextContent('B daemon');
+  expect(summary).toHaveTextContent('응답 지연');
+  expect(summary).toHaveTextContent('출근 08:15');
+  expect(summary).toHaveTextContent('퇴근 기록 확인 전');
+  const chart=screen.getByRole('region',{name:'프로젝트 일별 진행현황'});
+  expect(summary.compareDocumentPosition(chart)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ });
+
+ it('focuses an opened project detail and restores focus to its selected row',async()=>{
+  const {api,listeners}=fixture();
+  const user=userEvent.setup();
+  render(<App api={api}/>);
+  await user.click(await screen.findByRole('button',{name:'DevDock 상세 열기'}));
+  const detail=screen.getByRole('region',{name:'DevDock'});
+  const heading=within(detail).getByRole('heading',{name:'DevDock'});
+  const row=screen.getByRole('button',{name:'DevDock 상세 열기'});
+  expect(row).toHaveAttribute('aria-expanded','true');
+  expect(row).toHaveAttribute('aria-controls',detail.id);
+  expect(heading).toHaveFocus();
+  const close=within(detail).getByRole('button',{name:'상세 닫기'});
+  close.focus();
+  await act(async()=>{listeners.get('dashboard-updated')!(null);});
+  expect(close).toHaveFocus();
+  await user.click(close);
+  expect(row).toHaveFocus();
+  expect(row).toHaveAttribute('aria-expanded','false');
+ });
  it('does not label an unobserved daemon as working or healthy',async()=>{
   const {api}=fixture();render(<App api={api}/>);
   expect(await screen.findByText('접근 권한을 확인해 주세요.')).toBeInTheDocument();
@@ -276,7 +312,7 @@ describe('DevDock dashboard',()=>{
   Object.assign(snapshot.attendance,{serverState:'unknown',lastRunsByAction:{checkIn:run,checkOut:null},runs:[run]});
   const user=userEvent.setup();render(<App api={api}/>);
   expect(await screen.findByText(/서버 상태.*확인 불가/)).toBeInTheDocument();
-  expect(screen.getByText('출근 결과 확인 필요')).toBeVisible();
+  expect(within(screen.getByRole('region',{name:'오늘의 근태'})).getByText('출근 결과 확인 필요')).toBeVisible();
   expect(screen.getByText(/UNCERTAIN/)).not.toBeVisible();
   await user.click(screen.getByText('근태 실행 이력'));
   expect(screen.getByText(/UNCERTAIN/)).toBeVisible();

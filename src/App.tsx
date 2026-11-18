@@ -1,5 +1,5 @@
 // 데몬·프로젝트·차트·근태를 구분한 모던 다크 대시보드를 제공합니다.
-import {useCallback,useEffect,useMemo,useRef,useState,type FormEvent} from 'react';
+import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState,type FormEvent,type Ref} from 'react';
 import {Activity,ArrowDownRight,ArrowUpRight,Check,CheckCheck,ChevronRight,Clock3,Code2,Database,FolderKanban,LayoutDashboard,Loader2,MonitorDot,Plus,RefreshCw,Search,Settings2,ShieldCheck,Trash2,X} from 'lucide-react';
 import type {Api,AttendanceRun,Daemon,Monitor,Project,ProjectProgress,Registry,Settings,Snapshot,History} from './contracts';
 import {api as defaultApi} from './api';
@@ -60,13 +60,18 @@ function useProjectHistory(api:Api,projectId:string|undefined,hours:number,refre
 function HistoryError({message,onRetry}:{message:string;onRetry:()=>void}){
  return <div className="history-error"><p role="alert">진행 이력을 불러오지 못했습니다. {message}</p><button className="subtle-button" onClick={onRetry}>다시 조회</button></div>;
 }
+const daemonIsFresh=(daemon:Daemon)=>!daemon.freshness||daemon.freshness==='fresh';
+const daemonName=(daemon:Daemon)=>daemon.name||daemon.id+' daemon';
+function DaemonConnection({daemon}:{daemon?:Daemon}){
+ const state=daemon&&daemonIsFresh(daemon)?daemon.transportState:'unknown';
+ const tone=state==='healthy'?'good':state==='slow'||state==='disconnected'?'warn':'neutral';
+ return <span className={'status-pill '+tone}><i/>{transport[state]??'확인 불가'}</span>;
+}
 function DaemonCard({daemon}:{daemon:Daemon}){
- const fresh=!daemon.freshness||daemon.freshness==='fresh';
- const currentTransport=fresh?daemon.transportState:'unknown';
+ const fresh=daemonIsFresh(daemon);
  const currentActivity=fresh?daemon.activityState:'unknown';
- const good=currentTransport==='healthy';
  return <article className="daemon-card">
-  <div className="daemon-top"><div className={'daemon-symbol '+(daemon.id==='B'?'teal':'')}><Code2 size={18}/></div><h3>{daemon.name||daemon.id+' daemon'}</h3><span className={'status-pill '+(good?'good':currentTransport==='slow'?'warn':'neutral')}><i/>{transport[currentTransport]??'확인 불가'}</span></div>
+  <div className="daemon-top"><div className={'daemon-symbol '+(daemon.id==='B'?'teal':'')}><Code2 size={18}/></div><h3>{daemonName(daemon)}</h3><DaemonConnection daemon={daemon}/></div>
   <div className="daemon-main"><span className="activity-label">{activity[currentActivity]??'현재 활동 확인 불가'}</span>{fresh&&daemon.latencyMs!==null&&<span className="latency">{Math.round(daemon.latencyMs)}<small> ms</small></span>}</div>
   {daemon.freshness==='stale'&&<p className="daemon-reason">오래된 관측 · 마지막 관측: {transport[daemon.lastKnown?.transportState??'']??'확인 불가'} · {activity[daemon.lastKnown?.activityState??'']??'확인 불가'}</p>}
   {daemon.reason&&<p className="daemon-reason">{daemon.reason}</p>}
@@ -84,14 +89,17 @@ function ProjectSource({project,summary=false,current=false}:{project:ProjectPro
    :<span className="warning-text">{project.sourceErrors?.map((error,i)=><span key={i}>소스 오류: {error}</span>)}</span>)}
  </span>;
 }
-function ProgressRows({projects,onSelect,onAction}:{projects:ProjectProgress[];onSelect:(p:ProjectProgress)=>void;onAction:(value:ProjectAction)=>void}){
+function ProgressRows({projects,onSelect,onAction,selection}:{projects:ProjectProgress[];onSelect:(p:ProjectProgress)=>void;onAction:(value:ProjectAction)=>void;selection?:{id?:string;rowRef:Ref<HTMLButtonElement>}}){
  if(!projects.length)return <div className="empty-project"><FolderKanban size={30}/><h3>첫 프로젝트를 연결하세요.</h3><p>체크리스트와 검증 근거를 연결하면 진행상황을 확인할 수 있습니다.</p></div>;
- return <div className="project-rows">{projects.map(p=><article className="project-list-item" key={p.id}><button className="project-row" type="button" aria-label={p.name+' 상세 열기'} onClick={()=>onSelect(p)}>
+ return <div className="project-rows">{projects.map(p=>{
+  const expanded=selection?.id===p.id;
+  return <article className="project-list-item" key={p.id}><button className="project-row" type="button" aria-label={p.name+' 상세 열기'} aria-expanded={selection?expanded:undefined} aria-controls={expanded?'project-detail':undefined} ref={expanded?selection?.rowRef:undefined} onClick={()=>onSelect(p)}>
   <span className="project-icon"><FolderKanban size={19}/></span>
   <span className="project-copy"><strong>{p.name}</strong><span>{p.currentTask||'현재 작업 정보가 없습니다.'}</span><ProjectSource project={p} summary/></span>
   <span className="project-progress"><span className="progress-track"><i style={{width:(p.total?p.verified/p.total*100:0)+'%'}}/><b style={{width:(p.total?p.reportedComplete/p.total*100:0)+'%'}}/></span><span className="progress-caption"><span>검증 완료 {p.verified}</span><span>완료 보고 {p.reportedComplete}</span><span>전체 {p.total}개</span></span></span>
   <span className="project-row-end">{p.blocked>0&&<span className="warning-count">막힘 {p.blocked}</span>}<ChevronRight size={17}/></span>
- </button><ProjectActions project={p} onAction={onAction}/></article>)}</div>;
+ </button><ProjectActions project={p} onAction={onAction}/></article>;
+ })}</div>;
 }
 
 const attendanceActions:Record<string,string>={checkIn:'출근',checkOut:'퇴근'};
@@ -107,15 +115,37 @@ function attendanceResult(run:AttendanceRun,action:string){
   default:return action+' 결과 확인 불가';
  }
 }
+const attendanceKeys=['checkIn','checkOut'] as const;
+function attendanceReading(attendance:Snapshot['attendance'],key:typeof attendanceKeys[number]){
+ const action=attendanceActions[key],latest=attendance.lastRunsByAction?.[key];
+ const run=latest?.requestedDate===attendance.date?latest:attendance.runs.find(r=>r.action===key&&r.requestedDate===attendance.date);
+ const recorded=key==='checkIn'?attendance.checkInTime:attendance.checkOutTime;
+ return {action,recorded,status:run?attendanceResult(run,action):null};
+}
+function OperationsSummary({daemons,attendance}:{daemons:Daemon[];attendance:Snapshot['attendance']}){
+ return <section className="operations-summary" aria-label="데몬·근태 요약">
+  {['A','B'].map(id=>{
+   const daemon=daemons.find(d=>d.id===id);
+   return <div className="operations-summary-item" key={id}>
+    <Code2 size={16} aria-hidden="true"/><strong>{daemon?daemonName(daemon):id+' daemon'}</strong><DaemonConnection daemon={daemon}/>
+   </div>;
+  })}
+  <div className="operations-summary-item operations-summary-attendance">
+   <Clock3 size={16} aria-hidden="true"/><strong>오늘의 근태</strong>
+   <div className="operations-summary-times">{attendanceKeys.map(key=>{
+    const {action,recorded,status}=attendanceReading(attendance,key);
+    const label=recorded?action+' '+recorded:status??action+' 기록 확인 전';
+    return <span key={key}>{label}</span>;
+   })}</div>
+  </div>
+ </section>;
+}
 function AttendancePanel({attendance,settings,onSettings}:{attendance:Snapshot['attendance'];settings:Settings;onSettings:()=>void}){
- const today=attendance.date;
  return <section className="panel attendance-panel" aria-labelledby="attendance-title">
   <div className="section-heading"><div><h2 id="attendance-title">오늘의 근태</h2><p>{settings.attendanceEnabled?`${settings.startTime} 이상 ${settings.endTime} 미만 자동 출근`:'자동 출근·퇴근 알림 꺼짐'}</p></div><button className="subtle-button" onClick={onSettings}>설정 <ChevronRight size={14}/></button></div>
-  <div className="attendance-times">{(['checkIn','checkOut'] as const).map(key=>{
-   const action=attendanceActions[key], latest=attendance.lastRunsByAction?.[key];
-   const run=latest?.requestedDate===today?latest:attendance.runs.find(r=>r.action===key&&r.requestedDate===today);
-   const recorded=key==='checkIn'?attendance.checkInTime:attendance.checkOutTime;
-   return <div className="attendance-time" key={key}><b>{action}</b><span>{recorded??'—'}</span><small>{run?attendanceResult(run,action):recorded?action+' 기록 완료':'기록 확인 전'}</small></div>;
+  <div className="attendance-times">{attendanceKeys.map(key=>{
+   const {action,recorded,status}=attendanceReading(attendance,key);
+   return <div className="attendance-time" key={key}><b>{action}</b><span>{recorded??'—'}</span><small>{status??(recorded?action+' 기록 완료':'기록 확인 전')}</small></div>;
   })}</div>
   <p className="attendance-message">서버 상태: 확인 불가</p>
   {attendance.runs.length>0&&<details className="attendance-log"><summary>근태 실행 이력</summary>{attendance.runs.map(run=><p key={run.attemptId}>{run.requestedDate} · {attendanceResult(run,attendanceActions[run.action]??'근태')} · {run.state} · {run.code} · {run.message} · {run.recordDate} {run.time} · {run.result?JSON.stringify(run.result):'결과 없음'}</p>)}</details>}
@@ -137,6 +167,10 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  const [days,setDays]=useState<7|30>(7);
  const [dailyProjectId,setDailyProjectId]=useState<string>();
  const [snapshotVersion,setSnapshotVersion]=useState(0);
+ const [detailFocusRequest,setDetailFocusRequest]=useState(0);
+ const detailTitle=useRef<HTMLHeadingElement>(null);
+ const selectedRow=useRef<HTMLButtonElement>(null);
+ const projectSearch=useRef<HTMLInputElement>(null);
  const mutationTrigger=useRef<HTMLElement>(null);
  const loadGeneration=useRef(0);
  const dashboardLoad=useRef<{result:Promise<void>;next?:Promise<void>}|null>(null);
@@ -181,6 +215,21 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   return()=>{active=false;loadGeneration.current++;dashboardLoad.current=null;clearInterval(timer);cleanup.splice(0).forEach(fn=>fn());};
  },[api,load]);
  useEffect(()=>{if(checkout)declineRef.current?.focus();},[checkout]);
+ useLayoutEffect(()=>{
+  if(!detailFocusRequest)return;
+  const heading=detailTitle.current;
+  heading?.focus({preventScroll:true});
+  heading?.scrollIntoView?.({block:'start'});
+ },[detailFocusRequest]);
+ function openProject(project:ProjectProgress){
+  setSelected(project);
+  setPage('projects');
+  setDetailFocusRequest(request=>request+1);
+ }
+ function closeProject(){
+  setSelected(null);
+  (selectedRow.current??projectSearch.current)?.focus();
+ }
  const advancedChart=historyMode==='knowledge'||historyMode==='auto'&&snapshot?.projects.find(p=>p.id===dailyProjectId)?.progressMode==='managed';
  const dailyHistory=useProjectHistory(api,page==='overview'&&!advancedChart?dailyProjectId:undefined,days*24,chartRefresh);
  const detailHistory=useProjectHistory(api,page==='projects'?selected?.id:undefined,24,chartRefresh);
@@ -208,6 +257,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  {notice&&<div className="alert notice" role="status"><Check size={16}/><span>{notice}</span><button className="icon-button" aria-label="알림 닫기" onClick={()=>setNotice('')}><X size={15}/></button></div>}
  {!snapshot&&!loadError&&<div className="loading"><Loader2 className="spin"/>워크스페이스를 불러오는 중입니다.</div>}
  {page==='overview'&&snapshot&&<>
+  <OperationsSummary daemons={snapshot.daemons} attendance={snapshot.attendance}/>
   <div className="metrics" aria-label="프로젝트 요약">
    <div><span><FolderKanban size={15}/>연결 프로젝트</span><strong>{activeProjects.length}<small>개</small></strong></div>
    <div><span><Clock3 size={15}/>완료 보고가 있는 프로젝트</span><strong>{activeProjects.filter(p=>p.reportedComplete>0).length}<small>개</small></strong></div>
@@ -234,7 +284,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
      :<p className="history-pending" role="status">일별 진행 기록을 불러오는 중입니다.</p>}
    </div>:<div className="empty-project"><FolderKanban size={24}/><h3>연결된 프로젝트가 없습니다.</h3><p>프로젝트를 연결하면 일별 진행 기록을 볼 수 있습니다.</p></div>}
   </section>
-  <section className="panel project-panel"><div className="section-heading"><div><h2>프로젝트 진행상황 <span className="count">{projects.length}</span></h2><p>완료 보고와 실제 검증 근거를 구분합니다.</p></div><button className="text-button" onClick={()=>setPage('projects')}>전체 보기 <ArrowUpRight size={15}/></button></div><ProgressRows projects={projects} onAction={setProjectAction} onSelect={p=>{setSelected(p);setPage('projects');}}/></section>
+  <section className="panel project-panel"><div className="section-heading"><div><h2>프로젝트 진행상황 <span className="count">{projects.length}</span></h2><p>완료 보고와 실제 검증 근거를 구분합니다.</p></div><button className="text-button" onClick={()=>setPage('projects')}>전체 보기 <ArrowUpRight size={15}/></button></div><ProgressRows projects={projects} onAction={setProjectAction} onSelect={openProject}/></section>
   <div className="overview-operations">
    <section className="panel runtime-panel" aria-labelledby="runtime-title">
     <div className="section-heading"><div><h2 id="runtime-title">런타임 현재 상태</h2><p>5초 주기 점검</p></div></div>
@@ -245,15 +295,15 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
   <section className="panel recent-panel"><div className="section-heading"><div><h2>최근 활동</h2><p>실제 수신한 작업 이벤트입니다.</p></div><Activity size={17}/></div>{snapshot.events.length?<div className="event-list">{snapshot.events.slice(0,5).map(event=><div className="event" key={event.id}><div className="event-dot"/><div><strong>{event.message||event.type}</strong><span>{event.daemonId} · {time(event.at)}</span></div></div>)}</div>:<div className="activity-empty"><Database size={25}/><p>아직 관측한 활동이 없습니다.</p><span>연결 상태와 작업 활동은 별도로 표시합니다.</span></div>}<button className="activity-more" onClick={()=>setPage('activity')}>활동 이력 보기 <ArrowDownRight size={15}/></button></section>
  </>}
  {page==='projects'&&snapshot&&<>
-  <div className="list-toolbar"><div className="search"><Search size={16}/><input aria-label="프로젝트 검색" placeholder="프로젝트 검색" value={filter} onChange={e=>setFilter(e.target.value)}/></div><span className="small">총 {projects.length}개 프로젝트</span></div>
-  <section className="panel" aria-labelledby="projects-title"><h2 className="sr-only" id="projects-title">프로젝트 목록</h2><ProgressRows projects={projects} onAction={setProjectAction} onSelect={setSelected}/></section>
-  {selected&&<section className="panel detail">
+  <div className="list-toolbar"><div className="search"><Search size={16}/><input ref={projectSearch} aria-label="프로젝트 검색" placeholder="프로젝트 검색" value={filter} onChange={e=>setFilter(e.target.value)}/></div><span className="small">총 {projects.length}개 프로젝트</span></div>
+  <section className="panel" aria-labelledby="projects-title"><h2 className="sr-only" id="projects-title">프로젝트 목록</h2><ProgressRows projects={projects} onAction={setProjectAction} onSelect={openProject} selection={{id:selected?.id,rowRef:selectedRow}}/></section>
+  {selected&&<section className="panel detail" id="project-detail" aria-labelledby="project-detail-title">
    <div className="section-heading">
-    <div><h2>{selected.name}</h2><p>{selected.root}</p></div>
+    <div><h2 id="project-detail-title" tabIndex={-1} ref={detailTitle}>{selected.name}</h2><p>{selected.root}</p></div>
     <div className="detail-actions">
      <button className="subtle-button" onClick={e=>{mutationTrigger.current=e.currentTarget;setBaseRevision(registry?.revision);setEditing(registry?.projects.find(p=>p.id===selected.id)??selected);setForm('project');}}>프로젝트 수정</button>
      <button className="danger-button" onClick={e=>{mutationTrigger.current=e.currentTarget;setBaseRevision(registry?.revision);setRemove({entity:'project',item:selected});}}>프로젝트 제거</button>
-     <button className="icon-button" aria-label="상세 닫기" onClick={()=>setSelected(null)}><X size={17}/></button>
+     <button className="icon-button" aria-label="상세 닫기" onClick={closeProject}><X size={17}/></button>
     </div>
    </div>
    <ProjectActions project={selected} onAction={setProjectAction}/>
