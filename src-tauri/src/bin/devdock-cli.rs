@@ -38,6 +38,26 @@ fn run(engine: &Engine, args: &[String]) -> Result<Value, String> {
 }
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if let [flag, path] = args.as_slice() {
+        if flag == "--document-scan-worker" {
+            if devdock_core::knowledge::scanner::run_scan_worker(std::path::Path::new(path))
+                .is_err()
+            {
+                process::exit(1)
+            }
+            return;
+        }
+    }
+    if let [group, command, path] = args.as_slice() {
+        if group == "documents" && command == "scan-worker" {
+            if devdock_core::knowledge::scanner::run_scan_worker(std::path::Path::new(path))
+                .is_err()
+            {
+                process::exit(1)
+            }
+            return;
+        }
+    }
     let result = (|| -> Result<Value, String> {
         let dir = env::var_os("DEVDOCK_DATA_DIR")
             .map(PathBuf::from)

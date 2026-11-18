@@ -1,5 +1,6 @@
 // 프로젝트 문서와 진행 근거를 기존 엔진에 연결한다.
 pub mod models;
+pub mod scanner;
 pub(crate) mod store;
 use crate::service::Engine;
 use rusqlite::Connection;

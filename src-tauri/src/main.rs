@@ -78,6 +78,15 @@ fn listen_restore(app: tauri::AppHandle, event: usize) {
 #[cfg(not(windows))]
 fn listen_restore(_app: tauri::AppHandle, _event: usize) {}
 fn main() {
+    if let Some(path) = std::env::args_os()
+        .skip_while(|a| a != "--document-scan-worker")
+        .nth(1)
+    {
+        if devdock_core::knowledge::scanner::run_scan_worker(std::path::Path::new(&path)).is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     let Some(restore_event) = claim_instance() else {
         return;
     };
@@ -103,6 +112,7 @@ fn main() {
                 ui_ready: Arc::new(AtomicBool::new(false)),
             };
             app.manage(runtime.clone());
+            engine.knowledge().start_document_scheduler();
             tray::setup(app.handle())?;
             listen_restore(app.handle().clone(), restore_event);
             desktop::background(app.handle().clone(), runtime);
