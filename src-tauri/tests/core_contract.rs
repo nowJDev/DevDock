@@ -196,6 +196,349 @@ fn project_history_tracks_change_in_verified_progress() {
         .iter()
         .any(|x| x["total"] == 1 && x["verified"] == 1));
 }
+
+#[test]
+fn daily_progress_keeps_only_the_latest_observation_including_metadata() {
+    let d = tempdir().unwrap();
+    let checklist = d.path().join("tasks.md");
+    std::fs::write(&checklist, "- [ ] one\n").unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    e.mutate(
+        json!({"entity":"project","action":"upsert","value":{
+            "id":"p","name":"P","root":d.path(),"checklistPath":"tasks.md",
+            "trackingBasis":"Fixture checklist","sourceCapturedAt":"2026-01-02T03:04:05Z"
+        }}),
+        None,
+    )
+    .unwrap();
+    std::fs::write(&checklist, "- [x] one\n- [ ] two\n").unwrap();
+    e.snapshot().unwrap();
+
+    let history = e.history("p", 24).unwrap();
+    let daily = history["dailyProgress"].as_array().expect("daily history");
+    assert_eq!(daily.len(), 1);
+    let today = chrono::Local::now().date_naive().to_string();
+    assert_eq!(
+        daily[0],
+        json!({"projectId":"p","date":today,"at":daily[0]["at"],"total":2,"verified":0,
+            "reportedComplete":1,"trackingBasis":"Fixture checklist","sourceCapturedAt":"2026-01-02T03:04:05Z"})
+    );
+    assert!(chrono::DateTime::parse_from_rfc3339(daily[0]["at"].as_str().unwrap()).is_ok());
+    assert_eq!(history["progress"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn history_keeps_new_progress_on_its_original_collection_date() {
+    let d = tempdir().unwrap();
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT);",
+    ).unwrap();
+    let e = Engine::connect(d.path().into()).unwrap();
+    let earlier = chrono::Utc::now() - chrono::Duration::days(3);
+    let date = earlier
+        .with_timezone(&chrono::Local)
+        .date_naive()
+        .pred_opt()
+        .unwrap()
+        .to_string();
+    let at = earlier.to_rfc3339();
+    db.execute(
+        "INSERT INTO daily_progress(project_id,date,at,total,verified,reported,tracking_basis) VALUES('p',?1,?2,3,0,0,'Fixture')",
+        rusqlite::params![date,at],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO progress(at,project_id,total,verified,reported,collected_date) VALUES(?1,'p',3,0,0,?2)",
+        rusqlite::params![at,date],
+    ).unwrap();
+
+    let history = e.history("p", 168).unwrap();
+    let daily = history["dailyProgress"].as_array().unwrap();
+    assert_eq!(daily.len(), 1);
+    assert_eq!(daily[0]["date"], date);
+    assert_eq!(daily[0]["trackingBasis"], "Fixture");
+    assert_eq!(history["progress"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn history_preserves_raw_fields_outside_daily_retention_window() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    let at = (chrono::Utc::now() - chrono::Duration::days(95)).to_rfc3339();
+    e.record_observation(
+        json!({"id":"A","observedAt":at,"transportState":"healthy","latencyMs":12}),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO progress(at,project_id,total,verified,reported) VALUES(?1,'A',1,0,0)",
+        [&at],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO observation_minutes(daemon_id,minute,sample_count,success_count,failure_count,unknown_count,latency_sum,latency_count) VALUES('A',?1,1,1,0,0,12,1)",
+        [&at],
+    ).unwrap();
+
+    for hours in [2400, u32::MAX] {
+        let history = e.history("A", hours).unwrap();
+        assert_eq!(history["points"][0]["at"], at);
+        assert_eq!(history["progress"][0]["at"], at);
+        assert_eq!(history["minutes"][0]["at"], at);
+        assert_eq!(history["dailyProgress"], json!([]));
+    }
+}
+
+#[test]
+fn daily_progress_records_unchanged_totals_on_the_next_day() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    std::fs::write(d.path().join("tasks.md"), "- [x] one\n").unwrap();
+    e.mutate(
+        json!({"entity":"project","action":"upsert","value":{
+            "id":"p","name":"P","root":d.path(),"checklistPath":"tasks.md"
+        }}),
+        None,
+    )
+    .unwrap();
+    let history = e.history("p", 48).unwrap();
+    assert_eq!(
+        history["dailyProgress"]
+            .as_array()
+            .expect("initial daily history")
+            .len(),
+        1
+    );
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    let collected_date: String = db
+        .query_row(
+            "SELECT collected_date FROM progress WHERE project_id='p'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(history["dailyProgress"][0]["date"], collected_date);
+    let yesterday = chrono::Local::now() - chrono::Duration::days(1);
+    let yesterday_date = yesterday.date_naive().to_string();
+    db.execute(
+        "UPDATE daily_progress SET date=?1,at=?2 WHERE project_id='p'",
+        rusqlite::params![yesterday_date, yesterday.to_rfc3339()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE progress SET at=?1,collected_date=?2 WHERE project_id='p'",
+        rusqlite::params![yesterday.to_rfc3339(), yesterday_date],
+    )
+    .unwrap();
+
+    e.snapshot().unwrap();
+
+    let history = e.history("p", 48).unwrap();
+    let daily = history["dailyProgress"].as_array().unwrap();
+    assert_eq!(daily.len(), 2);
+    assert_eq!(daily[0]["date"], yesterday_date);
+    assert_eq!(
+        daily[1]["date"],
+        chrono::Local::now().date_naive().to_string()
+    );
+    for point in daily {
+        assert_eq!(point["total"], 1);
+        assert_eq!(point["reportedComplete"], 1);
+    }
+    assert_eq!(history["progress"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn daily_progress_does_not_turn_failed_sources_into_observations() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    let checklist = d.path().join("tasks.md");
+    e.mutate(
+        json!({"entity":"project","action":"upsert","value":{
+            "id":"p","name":"P","root":d.path(),"checklistPath":"tasks.md"
+        }}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(e.history("p", 24).unwrap()["dailyProgress"], json!([]));
+    std::fs::write(&checklist, "").unwrap();
+    e.snapshot().unwrap();
+    assert_eq!(e.history("p", 24).unwrap()["dailyProgress"][0]["total"], 0);
+    std::fs::write(&checklist, "- [x] one\n").unwrap();
+    e.snapshot().unwrap();
+    std::fs::remove_file(&checklist).unwrap();
+    assert_eq!(e.snapshot().unwrap()["projects"][0]["total"], 0);
+    let h = e.history("p", 24).unwrap();
+    assert_eq!(h["dailyProgress"][0]["total"], 1);
+    assert_eq!(
+        h["progress"].as_array().unwrap().last().unwrap()["total"],
+        1
+    );
+}
+
+#[test]
+fn daily_progress_keeps_prior_valid_structured_status_if_source_breaks() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    let file = d.path().join("status.json");
+    std::fs::write(
+        &file,
+        json!({"projectId":"p","tasks":[
+            {"id":"one","projectId":"p","title":"One","state":"reportedComplete","revision":"1"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    e.mutate(
+        json!({"entity":"project","action":"upsert","value":{
+            "id":"p","name":"P","root":d.path()
+        }}),
+        None,
+    )
+    .unwrap();
+    e.mutate(json!({"entity":"monitor","action":"upsert","value":{
+        "id":"m","name":"M","projectId":"p","source":"status.json","kind":"structuredStatus","enabled":true
+    }}),None).unwrap();
+    let good = e.history("p", 24).unwrap()["dailyProgress"].clone();
+    assert_eq!(good[0]["reportedComplete"], 1);
+
+    std::fs::write(&file, "{").unwrap();
+    let snapshot = e.snapshot().unwrap();
+    assert_eq!(snapshot["monitorStatuses"]["m"]["state"], "unknown");
+    let errors = snapshot["projects"][0]["sourceErrors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].as_str().unwrap().contains("status.json"));
+
+    let h = e.history("p", 24).unwrap();
+    assert_eq!(h["dailyProgress"], good);
+    assert_eq!(
+        h["progress"].as_array().unwrap().last().unwrap()["total"],
+        1
+    );
+}
+
+#[test]
+fn daily_progress_recovers_legacy_rows_by_local_calendar_date_and_absolute_time() {
+    use chrono::{FixedOffset, Local, TimeZone};
+    let d = tempdir().unwrap();
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER);").unwrap();
+    let today = Local::now().date_naive();
+    let local_sample = |days| {
+        let date = today.checked_sub_days(chrono::Days::new(days)).unwrap();
+        Local
+            .from_local_datetime(&date.and_hms_opt(12, 0, 0).unwrap())
+            .single()
+            .unwrap()
+    };
+    let edge = local_sample(29);
+    let other_day_offset = [
+        FixedOffset::west_opt(23 * 3600).unwrap(),
+        FixedOffset::east_opt(23 * 3600).unwrap(),
+    ]
+    .into_iter()
+    .find(|offset| edge.with_timezone(offset).date_naive() != edge.date_naive())
+    .unwrap();
+    let later = edge + chrono::Duration::nanoseconds(1);
+    for (at, total) in [
+        (later.with_timezone(&other_day_offset).to_rfc3339(), 4),
+        (edge.to_rfc3339(), 3),
+        (local_sample(30).to_rfc3339(), 55),
+        (local_sample(2).to_rfc3339(), 6),
+        ((Local::now() + chrono::Duration::days(1)).to_rfc3339(), 99),
+    ] {
+        db.execute(
+            "INSERT INTO progress(at,project_id,total,verified,reported) VALUES(?1,'p',?2,0,0)",
+            rusqlite::params![at, total],
+        )
+        .unwrap();
+    }
+    let e = Engine::connect(d.path().into()).unwrap();
+    let h = e.history("p", 720).unwrap();
+    let daily = h["dailyProgress"].as_array().expect("legacy daily history");
+    assert_eq!(daily.len(), 2);
+    assert_eq!(daily[0]["date"], edge.date_naive().to_string());
+    assert_eq!(daily[0]["total"], 4);
+    assert_eq!(daily[1]["date"], local_sample(2).date_naive().to_string());
+    assert_eq!(daily[1]["total"], 6);
+    assert_eq!(e.history("p", 48).unwrap()["dailyProgress"], json!([]));
+    assert_eq!(e.history("p", 49).unwrap()["dailyProgress"][0]["total"], 6);
+}
+
+#[test]
+fn daily_progress_prefers_the_latest_of_new_and_legacy_observations() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    let date = (chrono::Local::now() - chrono::Duration::days(2)).date_naive();
+    let at = |hour| {
+        use chrono::TimeZone;
+        chrono::Local
+            .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_rfc3339()
+    };
+    for (project, legacy_hour) in [("legacy-last", 14), ("daily-last", 10)] {
+        db.execute(
+            "INSERT INTO progress(at,project_id,total,verified,reported) VALUES(?1,?2,3,0,0)",
+            rusqlite::params![at(legacy_hour), project],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        e.history("legacy-last", 72).unwrap()["dailyProgress"][0]["total"],
+        3
+    );
+    for project in ["legacy-last", "daily-last"] {
+        db.execute("INSERT INTO daily_progress(project_id,date,at,total,verified,reported) VALUES(?1,?2,?3,5,0,0)",rusqlite::params![project,date.to_string(),at(12)]).unwrap();
+    }
+    assert_eq!(
+        e.history("legacy-last", 72).unwrap()["dailyProgress"][0]["total"],
+        3
+    );
+    assert_eq!(
+        e.history("daily-last", 72).unwrap()["dailyProgress"][0]["total"],
+        5
+    );
+}
+
+#[test]
+fn daily_progress_retains_ninety_local_days_without_touching_settings_or_runs() {
+    let d = tempdir().unwrap();
+    let e = Engine::open(d.path().into()).unwrap();
+    let mut settings = e.settings().unwrap();
+    settings["retentionDays"] = json!(2);
+    let settings = e.save_settings(settings).unwrap();
+    let run = e.claim_run("2026-01-01", "checkIn").unwrap().unwrap();
+    let db = rusqlite::Connection::open(d.path().join("devdock.sqlite3")).unwrap();
+    let today = chrono::Local::now();
+    let date = |days| {
+        today
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(days))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        e.history("p", u32::MAX).unwrap()["dailyProgress"],
+        json!([])
+    );
+    for days in [90, 89, 0] {
+        let at = today - chrono::Duration::days(days);
+        db.execute("INSERT INTO daily_progress(project_id,date,at,total,verified,reported) VALUES('p',?1,?2,1,0,0)",rusqlite::params![date(days as u64),at.to_rfc3339()]).unwrap();
+    }
+    let h = e.history("p", u32::MAX).unwrap();
+    assert_eq!(h["dailyProgress"].as_array().unwrap().len(), 2);
+    assert_eq!(h["dailyProgress"][0]["date"], date(89));
+    e.maintain_history(&today.to_rfc3339()).unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM daily_progress", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    e.finish_run(&run, json!({"state":"recorded"})).unwrap();
+    assert_eq!(e.settings().unwrap(), settings);
+}
 #[cfg(windows)]
 #[test]
 fn fake_bridge_result_and_malformed_output_are_distinguished() {
@@ -389,7 +732,7 @@ fn latest_observation_and_event_choose_current_activity_safely() {
         e.snapshot().unwrap()["daemons"][0]["activityState"],
         "working"
     );
-    e.record_observation(json!({"id":"A","transportState":"unknown","activityState":"working","observedAt":"2026-11-17T19:00:05+09:00"})).unwrap();
+    e.record_observation(json!({"id":"A","transportState":"unknown","activityState":"working","observedAt":recent_at("2026-11-17T19:00:05+09:00")})).unwrap();
     e.record_event(
         json!({"id":"later2","daemonId":"A","type":"turn.started","at":recent_at("2026-11-17T10:00:06Z")}),
     )

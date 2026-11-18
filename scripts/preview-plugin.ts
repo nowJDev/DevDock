@@ -13,7 +13,7 @@ export function previewPlugin(root:string):Plugin {
    try {
     const params=JSON.parse(body||'{}');const command=(req.url??'').split('?')[0].replace(/^\//,'');
     if(command==='frontend_ready'){res.end(JSON.stringify({ok:true}));return;}
-    const args=command==='get_snapshot'?['snapshot']:command==='get_registry'?['registry']:command==='get_history'?['history',String(params.monitorId??'A'),String(Math.max(1,Math.min(168,Number(params.hours)||24)))]:command==='refresh_now'?['snapshot']:null;
+    const args=command==='get_snapshot'?['snapshot']:command==='get_registry'?['registry']:command==='get_history'?['history',String(params.monitorId??'A'),String(Math.max(1,Math.min(2160,Number(params.hours)||24)))]:command==='refresh_now'?['snapshot']:null;
     if(!args){res.statusCode=403;res.end(JSON.stringify({error:'읽기 전용 미리보기입니다. 편집과 근태 기능은 네이티브 앱에서 사용하세요.'}));return;}
     const exe=join(root,'src-tauri','target','debug','devdock-cli.exe');
     const child=spawn(exe,args,{cwd:root,windowsHide:true,env:{...process.env,DEVDOCK_DATA_DIR:join(root,'.devdock-data')},stdio:['ignore','pipe','pipe']});

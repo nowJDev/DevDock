@@ -1,8 +1,12 @@
 // 등록 정보, 관측 및 근태 원장을 관리한다.
-use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{
+    DateTime, Days, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat,
+    Timelike, Utc,
+};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
+    collections::{BTreeMap, HashMap},
     fs,
     hash::{Hash, Hasher},
     io::Write,
@@ -11,6 +15,8 @@ use std::{
 };
 use uuid::Uuid;
 type R<T> = Result<T, String>;
+const DAILY_PROGRESS_RETENTION_DAYS: u32 = 90;
+const HOURS_PER_DAY: u32 = 24;
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -37,8 +43,38 @@ impl Engine {
     fn initialize(data_dir: PathBuf, recover: bool) -> R<Self> {
         fs::create_dir_all(&data_dir).map_err(err)?;
         let e = Self { data_dir };
-        let c = e.db()?;
-        c.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
+        let mut c = e.db()?;
+        let schema = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(err)?;
+        schema.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
+        schema
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS daily_progress(
+                project_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                at TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                verified INTEGER NOT NULL,
+                reported INTEGER NOT NULL,
+                tracking_basis TEXT,
+                source_captured_at TEXT,
+                PRIMARY KEY(project_id,date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_daily_progress_date ON daily_progress(date);",
+            )
+            .map_err(err)?;
+        let has_collected_date = schema.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('progress') WHERE name='collected_date')",
+            [],
+            |r| r.get::<_, bool>(0),
+        ).map_err(err)?;
+        if !has_collected_date {
+            schema
+                .execute("ALTER TABLE progress ADD COLUMN collected_date TEXT", [])
+                .map_err(err)?;
+        }
+        schema.commit().map_err(err)?;
         if recover {
             c.execute(
                 "UPDATE runs SET state='uncertain' WHERE state='pending'",
@@ -612,6 +648,12 @@ impl Engine {
             .checked_sub_signed(chrono::Duration::days(90))
             .ok_or("invalid date")?;
         let long_cutoff = long_time.to_rfc3339();
+        let daily_cutoff = now
+            .with_timezone(&Local)
+            .date_naive()
+            .checked_sub_days(Days::new(u64::from(DAILY_PROGRESS_RETENTION_DAYS - 1)))
+            .ok_or("invalid date")?
+            .to_string();
         let minute_cutoff = long_time
             .with_second(0)
             .and_then(|t| t.with_nanosecond(0))
@@ -640,6 +682,8 @@ impl Engine {
                 [&long_cutoff],
             )
             .map_err(err)?;
+        tx.execute("DELETE FROM daily_progress WHERE date<?1", [daily_cutoff])
+            .map_err(err)?;
         let minutes = tx
             .execute(
                 "DELETE FROM observation_minutes WHERE julianday(minute)<julianday(?1)",
@@ -654,21 +698,100 @@ impl Engine {
 
     pub fn history(&self, id: &str, hours: u32) -> R<Value> {
         let c = self.db()?;
-        let cutoff = (Local::now() - chrono::Duration::hours(hours as i64)).to_rfc3339();
+        let now = Local::now();
+        // 요청 범위가 SQLite의 시간 범위보다 넓으면 저장된 원시 시각을 모두 조회한다.
+        let cutoff = now
+            .to_utc()
+            .checked_sub_signed(chrono::Duration::hours(i64::from(hours)))
+            .map(|at| at.to_rfc3339());
         let mut st = c
-            .prepare("SELECT data FROM observations WHERE daemon_id=?1 AND julianday(at)>=julianday(?2) ORDER BY julianday(at),id")
+            .prepare("SELECT data FROM observations WHERE daemon_id=?1 AND julianday(at)>=COALESCE(julianday(?2),0) ORDER BY julianday(at),id")
             .map_err(err)?;
         let points=st.query_map(params![id,cutoff],|r|r.get::<_,String>(0)).map_err(err)?.filter_map(Result::ok).filter_map(|s|serde_json::from_str::<Value>(&s).ok()).map(|v|json!({"at":v["observedAt"],"latencyMs":v["latencyMs"],"value":v["value"],"unit":v["unit"],"metricId":v["metricId"],"state":v["transportState"]})).collect::<Vec<_>>();
-        let mut ps=c.prepare("SELECT at,project_id,total,verified,reported FROM progress WHERE project_id=?1 AND julianday(at)>=julianday(?2) ORDER BY julianday(at),id").map_err(err)?;
+        let mut ps=c.prepare("SELECT at,project_id,total,verified,reported FROM progress WHERE project_id=?1 AND julianday(at)>=COALESCE(julianday(?2),0) ORDER BY julianday(at),id").map_err(err)?;
         let progress=ps.query_map(params![id,cutoff],|r|Ok(json!({"at":r.get::<_,String>(0)?,"projectId":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"verified":r.get::<_,i64>(3)?,"reportedComplete":r.get::<_,i64>(4)?}))).map_err(err)?.collect::<Result<Vec<_>,_>>().map_err(err)?;
-        let mut ms=c.prepare("SELECT minute,sample_count,success_count,failure_count,unknown_count,latency_sum,latency_count FROM observation_minutes WHERE daemon_id=?1 AND julianday(minute)>=julianday(?2) ORDER BY julianday(minute)").map_err(err)?;
+        let mut ms=c.prepare("SELECT minute,sample_count,success_count,failure_count,unknown_count,latency_sum,latency_count FROM observation_minutes WHERE daemon_id=?1 AND julianday(minute)>=COALESCE(julianday(?2),0) ORDER BY julianday(minute)").map_err(err)?;
         let minutes=ms.query_map(params![id,cutoff],|r|Ok(json!({"at":r.get::<_,String>(0)?,"sampleCount":r.get::<_,i64>(1)?,"successCount":r.get::<_,i64>(2)?,"failureCount":r.get::<_,i64>(3)?,"unknownCount":r.get::<_,i64>(4)?,"latencySum":r.get::<_,f64>(5)?,"latencyCount":r.get::<_,i64>(6)?}))).map_err(err)?.collect::<Result<Vec<_>,_>>().map_err(err)?;
-        Ok(json!({"monitorId":id,"points":points,"progress":progress,"minutes":minutes}))
+        let days = hours
+            .div_ceil(HOURS_PER_DAY)
+            .clamp(1, DAILY_PROGRESS_RETENTION_DAYS);
+        let daily_progress = Self::daily_progress(&c, id, now, days)?;
+        Ok(
+            json!({"monitorId":id,"points":points,"progress":progress,"minutes":minutes,"dailyProgress":daily_progress}),
+        )
+    }
+
+    fn daily_progress(c: &Connection, id: &str, now: DateTime<Local>, days: u32) -> R<Vec<Value>> {
+        let today = now.date_naive();
+        let first_day = today
+            .checked_sub_days(Days::new(u64::from(days - 1)))
+            .ok_or("invalid date")?;
+        // 오프셋이 다른 기존 기록은 넉넉히 조회하고 SQLite가 해석하지 못하는 시각도 Rust에서 확인한다.
+        let legacy_cutoff =
+            (first_day.and_time(NaiveTime::MIN).and_utc() - Days::new(1)).to_rfc3339();
+        let mut stmt = c
+            .prepare(
+                "SELECT collected_date,at,total,verified,reported,NULL,NULL,id,0 AS is_daily
+                   FROM progress
+                  WHERE project_id=?1 AND
+                        (collected_date BETWEEN ?3 AND ?4 OR
+                         (collected_date IS NULL AND (julianday(at)>=julianday(?2) OR julianday(at) IS NULL)))
+                 UNION ALL
+                 SELECT date,at,total,verified,reported,tracking_basis,source_captured_at,NULL,1
+                   FROM daily_progress
+                  WHERE project_id=?1 AND date BETWEEN ?3 AND ?4
+                 ORDER BY is_daily,id",
+            )
+            .map_err(err)?;
+        let mut rows = stmt
+            .query(params![
+                id,
+                legacy_cutoff,
+                first_day.to_string(),
+                today.to_string()
+            ])
+            .map_err(err)?;
+        let mut latest = BTreeMap::<NaiveDate, (DateTime<FixedOffset>, Value)>::new();
+        while let Some(row) = rows.next().map_err(err)? {
+            let stored_date: Option<String> = row.get(0).map_err(err)?;
+            let timestamp: String = row.get(1).map_err(err)?;
+            let Ok(at) = DateTime::parse_from_rfc3339(&timestamp) else {
+                continue;
+            };
+            let date = match stored_date {
+                Some(date) => NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(err)?,
+                None => at.with_timezone(&Local).date_naive(),
+            };
+            if date < first_day || date > today || at > now {
+                continue;
+            }
+            if latest
+                .get(&date)
+                .is_some_and(|(existing, _)| *existing > at)
+            {
+                continue;
+            }
+            latest.insert(
+                date,
+                (
+                    at,
+                    json!({
+                        "projectId": id, "date": date.to_string(), "at": timestamp,
+                        "total": row.get::<_, i64>(2).map_err(err)?,
+                        "verified": row.get::<_, i64>(3).map_err(err)?,
+                        "reportedComplete": row.get::<_, i64>(4).map_err(err)?,
+                        "trackingBasis": row.get::<_, Option<String>>(5).map_err(err)?,
+                        "sourceCapturedAt": row.get::<_, Option<String>>(6).map_err(err)?,
+                    }),
+                ),
+            );
+        }
+        Ok(latest.into_values().map(|(_, point)| point).collect())
     }
     pub fn snapshot(&self) -> R<Value> {
         let reg = self.registry()?;
         let settings = self.settings()?;
-        let c = self.db()?;
+        let mut c = self.db()?;
         let mut daemons = Vec::new();
         for id in ["A", "B"] {
             let obs:Option<String>=c.query_row("SELECT data FROM observations WHERE daemon_id=?1 ORDER BY julianday(at) DESC,id DESC LIMIT 1",[id],|r|r.get(0)).optional().map_err(err)?;
@@ -790,6 +913,13 @@ impl Engine {
             .cloned()
             .unwrap_or_default();
         let mut monitor_statuses = serde_json::Map::new();
+        let mut project_source_errors = HashMap::<&str, Vec<String>>::new();
+        let collection_time = Local::now();
+        let collection_date = collection_time.date_naive().to_string();
+        // 고정 정밀도의 UTC 시각은 오프셋이 바뀌어도 SQLite에서 정확히 비교할 수 있다.
+        let collected_at = collection_time
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Nanos, true);
         for m in reg["monitors"].as_array().unwrap() {
             let mid = m["id"].as_str().unwrap_or("");
             if m["archived"] == true {
@@ -808,6 +938,7 @@ impl Engine {
             if m["kind"] != "structuredStatus" {
                 continue;
             }
+            let source = m["source"].as_str().unwrap_or("");
             let project = reg["projects"]
                 .as_array()
                 .unwrap()
@@ -816,7 +947,7 @@ impl Engine {
             let result = project
                 .ok_or("project unavailable".to_owned())
                 .and_then(|p| {
-                    let path = PathBuf::from(m["source"].as_str().unwrap_or(""));
+                    let path = PathBuf::from(source);
                     let path = if path.is_absolute() {
                         path
                     } else {
@@ -848,8 +979,15 @@ impl Engine {
                     statuses.insert(v["projectId"].as_str().unwrap().to_owned(), v);
                 }
                 Err(_) => {
+                    let reason = "상태 파일을 읽거나 검증하지 못했습니다.";
+                    if let Some(project_id) = m["projectId"].as_str() {
+                        project_source_errors
+                            .entry(project_id)
+                            .or_default()
+                            .push(format!("{reason} ({source})"));
+                    }
                     let checked = now();
-                    monitor_statuses.insert(mid.into(),json!({"state":"unknown","value":null,"unit":null,"reason":"상태 파일을 읽거나 검증하지 못했습니다.","checkedAt":checked}));
+                    monitor_statuses.insert(mid.into(),json!({"state":"unknown","value":null,"unit":null,"reason":reason,"checkedAt":checked}));
                     let data =
                         json!({"observedAt":checked,"value":null,"transportState":"unknown"});
                     c.execute(
@@ -893,7 +1031,7 @@ impl Engine {
             let mut seen_paths = std::collections::HashSet::new();
             let mut tasks = Vec::<Value>::new();
             let mut content = String::new();
-            let mut errors = Vec::<String>::new();
+            let mut errors = project_source_errors.remove(id).unwrap_or_default();
             for (mid, path) in paths {
                 let path = if path.is_absolute() {
                     path
@@ -1055,15 +1193,37 @@ impl Engine {
                     .find(|t| t["state"] == "inProgress")
                     .and_then(|t| t["title"].as_str())
                     .unwrap_or("")));
+            let valid = errors.is_empty();
             out["sourceErrors"] = json!(errors);
             out["tasks"] = json!(tasks);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            out.to_string().hash(&mut hasher);
-            content.hash(&mut hasher);
-            let fingerprint = format!("{:016x}", hasher.finish());
-            let changed=c.execute("INSERT INTO fingerprints(project_id,fingerprint) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint WHERE fingerprint<>excluded.fingerprint",params![id,fingerprint]).map_err(err)?;
-            if changed > 0 {
-                c.execute("INSERT INTO progress(at,project_id,total,verified,reported) VALUES(?1,?2,?3,?4,?5)",params![now(),id,total as i64,verified as i64,reported as i64]).map_err(err)?;
+            if valid {
+                let tx = c
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(err)?;
+                let accepted = tx.execute(
+                    "INSERT INTO daily_progress(project_id,date,at,total,verified,reported,tracking_basis,source_captured_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                     ON CONFLICT(project_id,date) DO UPDATE SET
+                        at=excluded.at,total=excluded.total,verified=excluded.verified,reported=excluded.reported,
+                        tracking_basis=excluded.tracking_basis,source_captured_at=excluded.source_captured_at
+                     WHERE excluded.at>=daily_progress.at",
+                    params![id,collection_date,collected_at,total as i64,verified as i64,reported as i64,
+                        p["trackingBasis"].as_str(),p["sourceCapturedAt"].as_str()],
+                ).map_err(err)?;
+                if accepted > 0 {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    out.to_string().hash(&mut hasher);
+                    content.hash(&mut hasher);
+                    let fingerprint = format!("{:016x}", hasher.finish());
+                    let changed=tx.execute("INSERT INTO fingerprints(project_id,fingerprint) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint WHERE fingerprint<>excluded.fingerprint",params![id,fingerprint]).map_err(err)?;
+                    if changed > 0 {
+                        tx.execute(
+                            "INSERT INTO progress(at,project_id,total,verified,reported,collected_date) VALUES(?1,?2,?3,?4,?5,?6)",
+                            params![collected_at,id,total as i64,verified as i64,reported as i64,collection_date],
+                        ).map_err(err)?;
+                    }
+                }
+                tx.commit().map_err(err)?;
             }
             projects.push(out);
         }

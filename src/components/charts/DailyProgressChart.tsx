@@ -1,0 +1,216 @@
+// 일별 진행 기록의 차트와 접근 가능한 표를 렌더링합니다.
+import {useEffect, useId, useMemo, useRef, useState} from 'react';
+import type {EChartsType} from 'echarts/core';
+import type {DailyProgressPoint} from '../../contracts';
+import {dailyProgressRows, type DailyProgressRow} from './dailyProgress';
+
+interface DailyProgressChartProps {
+  points: DailyProgressPoint[];
+  days: 7 | 30;
+  today: string;
+  projectName: string;
+}
+
+interface MountedChart {
+  instance: EChartsType;
+  observer?: ResizeObserver;
+}
+
+const metrics = [
+  {key: 'total', label: '전체 작업', color: '#A7B5C9', symbol: 'circle', symbolSize: 13, lineType: 'solid'},
+  {key: 'verified', label: '검증 완료', color: '#62B5FF', symbol: 'diamond', symbolSize: 9, lineType: 'dashed'},
+  {key: 'reportedComplete', label: '미검증 완료 보고', color: '#FFB454', symbol: 'triangle', symbolSize: 6, lineType: 'dotted'},
+] as const;
+
+const chartOptions = {
+  animation: false,
+  backgroundColor: '#141E2C',
+  color: metrics.map(metric => metric.color),
+  grid: {top: 44, right: 24, bottom: 34, left: 48, outerBoundsMode: 'same'},
+  legend: {top: 8, textStyle: {color: '#D4DFEE', fontSize: 12}},
+  tooltip: {
+    trigger: 'axis',
+    confine: true,
+    transitionDuration: 0,
+    backgroundColor: '#233044',
+    borderColor: '#40516A',
+    textStyle: {color: '#E8EEF7'},
+  },
+  xAxis: {
+    type: 'category',
+    axisLine: {lineStyle: {color: '#40516A'}},
+    axisLabel: {
+      color: '#A7B5C9',
+      hideOverlap: true,
+      showMinLabel: true,
+      showMaxLabel: true,
+      formatter: (value: string) => value.slice(5).replace('-', '/'),
+    },
+  },
+  yAxis: {
+    type: 'value',
+    min: 0,
+    minInterval: 1,
+    axisLabel: {color: '#A7B5C9'},
+    splitLine: {lineStyle: {color: '#2B384A'}},
+  },
+};
+
+const collectionTime = new Intl.DateTimeFormat('ko-KR', {
+  dateStyle: 'short',
+  timeStyle: 'medium',
+  hourCycle: 'h23',
+});
+
+function disposeChart(chart: MountedChart | null) {
+  chart?.observer?.disconnect();
+  chart?.instance.dispose();
+}
+
+function SourceTime({value}: {value?: string | null}) {
+  const source = value?.trim();
+  if (!source) return '미기록';
+  const time = Date.parse(source);
+  if (!Number.isFinite(time)) return source;
+  const display = /^\d{4}-\d{2}-\d{2}$/.test(source) ? source : collectionTime.format(time);
+  return <time dateTime={source}>{display}</time>;
+}
+
+export default function DailyProgressChart({points, days, today, projectName}: DailyProgressChartProps) {
+  const rows = useMemo(() => dailyProgressRows(points, days, today), [points, days, today]);
+  const ref = useRef<HTMLDivElement>(null);
+  const mountedChart = useRef<MountedChart | null>(null);
+  const [failedRows, setFailedRows] = useState<DailyProgressRow[] | null>(null);
+  const basisNoteId = useId();
+  const hasData = rows?.some(row => row.point !== null) ?? false;
+  const chartFailed = rows !== null && failedRows === rows;
+  const knownBases = new Set(rows?.map(row => row.point?.trackingBasis?.trim()).filter(Boolean));
+  const basisChanged = knownBases.size > 1;
+
+  useEffect(() => () => {
+    disposeChart(mountedChart.current);
+    mountedChart.current = null;
+  }, []);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || !rows || !hasData) return;
+
+    const options = {
+      xAxis: {data: rows.map(row => row.date)},
+      series: metrics.map(metric => ({
+        id: metric.key,
+        data: rows.map(row => row.point?.[metric.key] ?? null),
+      })),
+    };
+
+    function showFallback() {
+      disposeChart(mountedChart.current);
+      mountedChart.current = null;
+      setFailedRows(rows);
+    }
+
+    if (mountedChart.current) {
+      try {
+        // 데이터만 병합해 사용자가 고른 범례 표시 상태를 보존합니다.
+        mountedChart.current.instance.setOption(options);
+      } catch {
+        showFallback();
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all([
+      import('echarts/core'),
+      import('echarts/charts'),
+      import('echarts/components'),
+      import('echarts/renderers'),
+    ]).then(([echarts, charts, components, renderers]) => {
+      if (cancelled) return;
+      echarts.use([
+        charts.LineChart,
+        components.GridComponent,
+        components.TooltipComponent,
+        components.LegendComponent,
+        renderers.CanvasRenderer,
+      ]);
+      const instance = echarts.init(element, undefined, {renderer: 'canvas'});
+      const chart: MountedChart = {instance};
+      mountedChart.current = chart;
+      instance.setOption({
+        ...chartOptions,
+        xAxis: {...chartOptions.xAxis, ...options.xAxis},
+        series: metrics.map((metric, index) => ({
+          ...options.series[index],
+          name: metric.label,
+          type: 'line',
+          symbol: metric.symbol,
+          symbolSize: metric.symbolSize,
+          showAllSymbol: true,
+          connectNulls: false,
+          lineStyle: {width: 2, type: metric.lineType},
+        })),
+      });
+      if (typeof ResizeObserver !== 'undefined') {
+        chart.observer = new ResizeObserver(() => {
+          if (!element.hidden && mountedChart.current === chart) instance.resize();
+        });
+        chart.observer.observe(element);
+      }
+    }).catch(() => {
+      if (!cancelled) showFallback();
+    });
+
+    return () => { cancelled = true; };
+  }, [rows, hasData]);
+
+  return <>
+    {basisChanged && (
+      <p id={basisNoteId} className="daily-chart-note">
+        선택한 기간에 집계 기준이 바뀌었습니다. 수치를 비교할 때 일별 데이터 표의 집계 기준을 확인해 주세요.
+      </p>
+    )}
+    <div
+      ref={ref}
+      className="daily-chart"
+      hidden={!hasData || chartFailed}
+      role="img"
+      aria-label="프로젝트 일별 진행현황 차트"
+      aria-describedby={basisChanged ? basisNoteId : undefined}
+    />
+    {!rows && <p className="daily-chart-note">프로젝트가 다른 기록이 포함되어 표시할 수 없습니다.</p>}
+    {rows && !hasData && <p className="daily-chart-note">선택한 기간에 수집한 기록이 아직 없습니다.</p>}
+    {chartFailed && <p className="daily-chart-note" role="status">차트를 표시할 수 없습니다. 일별 데이터 표에서 확인할 수 있습니다.</p>}
+    {rows && <details>
+      <summary>일별 데이터 표</summary>
+      <div className="daily-chart-table">
+        <table className="daily-table">
+          <caption>{projectName} 일별 진행현황</caption>
+          <thead>
+            <tr>
+              <th scope="col">날짜</th>
+              {metrics.map(metric => <th key={metric.key} scope="col">{metric.label}</th>)}
+              <th scope="col">마지막 수집 시각</th>
+              <th scope="col">집계 기준</th>
+              <th scope="col">자료 기준</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({date, point}) => (
+              <tr key={date}>
+                <th scope="row">{date}</th>
+                {point ? <>
+                  {metrics.map(metric => <td key={metric.key}>{point[metric.key]}</td>)}
+                  <td><time dateTime={point.at}>{collectionTime.format(new Date(point.at))}</time></td>
+                  <td>{point.trackingBasis?.trim() ? point.trackingBasis : '미기록'}</td>
+                  <td><SourceTime value={point.sourceCapturedAt}/></td>
+                </> : <td colSpan={metrics.length + 3}>미수집</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>}
+  </>;
+}
