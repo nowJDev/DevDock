@@ -75,6 +75,7 @@ impl Engine {
                 .map_err(err)?;
         }
         schema.commit().map_err(err)?;
+        crate::knowledge::store::initialize(&mut c)?;
         if recover {
             c.execute(
                 "UPDATE runs SET state='uncertain' WHERE state='pending'",
@@ -102,9 +103,13 @@ impl Engine {
         }
         Ok(e)
     }
-    fn db(&self) -> R<Connection> {
+    pub fn knowledge(&self) -> crate::knowledge::KnowledgeService {
+        crate::knowledge::KnowledgeService::new(self.clone())
+    }
+    pub(crate) fn db(&self) -> R<Connection> {
         let c = Connection::open(self.data_dir.join("devdock.sqlite3")).map_err(err)?;
         c.busy_timeout(Duration::from_secs(5)).map_err(err)?;
+        c.pragma_update(None, "foreign_keys", true).map_err(err)?;
         Ok(c)
     }
     pub fn data_dir(&self) -> &Path {
