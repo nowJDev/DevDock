@@ -190,6 +190,10 @@ impl Walker<'_> {
             }) {
                 continue;
             }
+            // The NAS allocation map is control metadata and is read separately.
+            if self.source["location"] == "nas" && rel == super::publish_files::MAP {
+                continue;
+            }
             if meta.len() > MAX_FILE {
                 self.errors.push(format!("{rel}: file limit"));
                 continue;

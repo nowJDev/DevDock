@@ -11,7 +11,8 @@ use std::{
 use uuid::Uuid;
 
 const FILE_LIMIT: u64 = 2 * 1024 * 1024;
-const MAP: &str = "프로젝트 개발 지침/문서 배치표.json";
+pub(super) const MAP: &str = "프로젝트 개발 지침/문서 배치표.json";
+const MAP_LIMIT: u64 = 4 * 1024 * 1024;
 const RECEIPT: &str = "검토·검증 결과/문서 정리 검증/게시 영수증.json";
 const GUIDE: &str = "프로젝트_문서정리_실행지침.md";
 const LOCK: &str = ".devdock-publish.pending";
@@ -167,13 +168,16 @@ fn checked(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 fn read(path: &Path) -> Result<Vec<u8>> {
+    read_limited(path, FILE_LIMIT)
+}
+fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)
         .map_err(err)?
-        .take(FILE_LIMIT + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(err)?;
-    if bytes.len() as u64 > FILE_LIMIT {
+    if bytes.len() as u64 > limit {
         return Err("게시 문서가 파일 크기 한도를 넘었습니다.".into());
     }
     Ok(bytes)
@@ -206,7 +210,7 @@ pub fn inspect(root: &Path, targets: &[Target]) -> Result<(Protocol, Vec<Prior>)
     if declarations != ["1.3.0."] {
         return Err("지원하는 NAS 문서 규약 v1.3.0을 확인할 수 없습니다.".into());
     }
-    let map_bytes = read(&checked(root, MAP)?)?;
+    let map_bytes = read_limited(&checked(root, MAP)?, MAP_LIMIT)?;
     let map = json_bytes(&map_bytes)?;
     if map["schema_version"] != 3 {
         return Err("지원하지 않는 NAS 문서 배치표입니다.".into());
@@ -273,7 +277,8 @@ fn recheck_protocol(root: &Path, protocol: &Protocol) -> Result<()> {
         (MAP, &protocol.map_hash),
         (protocol.receipt_path.as_str(), &protocol.receipt_hash),
     ] {
-        if sha256(&read(&checked(root, name)?)?) != *hash {
+        let limit = if name == MAP { MAP_LIMIT } else { FILE_LIMIT };
+        if sha256(&read_limited(&checked(root, name)?, limit)?) != *hash {
             return Err("NAS 문서 규약이나 게시 기준이 미리보기 이후 변경되었습니다.".into());
         }
     }
@@ -548,7 +553,7 @@ pub fn receipt_status(root: &Path) -> Value {
         return json!({"receiptState":"devdockPending","fullAudit":false});
     }
     let load = || -> Result<Value> {
-        let map = json_bytes(&read(&checked(root, MAP)?)?)?;
+        let map = json_bytes(&read_limited(&checked(root, MAP)?, MAP_LIMIT)?)?;
         if map["schema_version"] != 3 {
             return Ok(json!({"receiptState":"unsupported","fullAudit":false}));
         }

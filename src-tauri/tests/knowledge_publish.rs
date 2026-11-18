@@ -279,3 +279,19 @@ fn missing_backup_keeps_recovery_open() {
     assert_eq!(recovery.files[0].state, "uncertain");
     assert!(ops::inspect(&root, &targets).is_err());
 }
+
+#[test]
+fn actual_size_publication_map_is_read_as_metadata() {
+    use devdock_core::knowledge::publish_files as ops;
+    let (_d, root, targets) = fake_share();
+    let path = root.join("프로젝트 개발 지침/문서 배치표.json");
+    let mut map: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    map["auxiliary"] = json!(" ".repeat(2_150_000));
+    std::fs::write(path, serde_json::to_vec(&map).unwrap()).unwrap();
+    assert_eq!(
+        ops::receipt_status(&root)["receiptState"],
+        "published_verified"
+    );
+    assert!(ops::inspect(&root, &targets).is_ok());
+}
