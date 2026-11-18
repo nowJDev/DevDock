@@ -83,6 +83,38 @@ Status는 projectId, 선택적 currentTask, tasks, metrics를 가진다. 하위 
 
 CLI는 실제 근태를 실행하는 명령을 제공하지 않는다. 명령과 설정에 인증 정보·개인 계정·원문 대화를 넣지 않는다.
 
+## 문서와 진행 관리 CLI.
+
+새 문서 명령은 `documents`, `analysis`, `progress` 그룹을 사용한다. 긴 입력은 UTF-8 JSON 파일을 `--input FILE`로 전달한다. 수정에는 조회한 설정 revision 또는 프로젝트 revision이 필요하다. 알 수 없는 속성과 오래된 revision은 거절한다.
+
+```text
+devdock-cli documents config
+devdock-cli documents source-upsert --input source.json
+devdock-cli documents scan --input scan.json
+devdock-cli documents list --input project.json
+devdock-cli documents read --input excerpt.json
+devdock-cli analysis create --input request.json
+devdock-cli analysis claim --input claim.json
+devdock-cli analysis heartbeat --input heartbeat.json
+devdock-cli analysis submit --input result.json
+devdock-cli analysis parse --input job.json
+devdock-cli analysis preview --input job.json
+devdock-cli analysis review --input review.json
+devdock-cli progress get --input project.json
+devdock-cli progress save-basis --input basis.json
+devdock-cli progress task --input task-change.json
+devdock-cli progress activate --input cutover.json
+devdock-cli progress apply --input selection.json
+devdock-cli progress undo --input undo.json
+devdock-cli progress history --input range.json
+```
+
+예를 들어 `project.json`은 `{"projectId":"sample"}`, `scan.json`은 `{"sourceIds":[],"force":true}`다. `excerpt.json`은 `{"versionId":"VERSION_ID","start":1,"limit":200}`이며 최대 1000행까지 읽는다. 요청·결과 계약은 `src/knowledge/contracts.ts`와 `src-tauri/src/knowledge/commands.rs`에 정의한다. `knowledge COMMAND_JSON`은 같은 명령의 공통 접점이며 `knowledge-readonly COMMAND_JSON`은 조회만 허용한다.
+
+문서 내용 분석은 자동 AI 실행이 아니다. 분석 요청 ID를 현재 Codex에 전달하고 문서 버전·해시·원문 구간을 확인한 결과를 lease token과 함께 제출한다. 분석 완료는 검토 후보 생성이며 선택 반영 전까지 현재 수치를 바꾸지 않는다. 과거 가져오기는 기본 `history` 모드이고 현재 작업 변경은 별도의 `current` 모드를 요구한다.
+
+관리 전환한 프로젝트는 DB 기준으로 집계한다. 기존 task/status 쓰기는 전용 문서·진행 명령 사용을 안내하며 거절한다. 기존 기준 미기록 관측은 `legacy`로 조회하고 명시적 보관 미리보기·반영으로 90일 이후에도 보존할 수 있다. 새 진행 기준과 자동 합산하지 않는다.
+
 ## 일별 진행 이력.
 
 프로젝트 수치가 바뀌지 않아도 앱이 실제로 수집한 날짜에는 마지막 값을 저장한다. 같은 날의 반복 점검은 한 일별 기록을 갱신하며 새 날짜에는 새 기록을 만든다. 소스 오류를 완료율 0으로 기록하지 않는다. 기존 변경 이력의 날짜별 마지막 기록도 표시하지만, 기록이 없는 과거 날짜는 복원하지 않는다. 일별 이력은 90일 보존한다.

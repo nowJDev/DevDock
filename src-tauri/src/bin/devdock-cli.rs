@@ -11,6 +11,9 @@ fn revision(s: Option<&String>) -> Result<Option<u64>, String> {
         .transpose()
 }
 fn run(engine: &Engine, args: &[String]) -> Result<Value, String> {
+    if let Some((request, preview)) = devdock_core::knowledge::commands::cli_request(args)? {
+        return engine.knowledge().execute_command(request, preview, true);
+    }
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["snapshot"] => engine.snapshot(),
         ["registry"] => engine.registry(),

@@ -1,4 +1,5 @@
 // 프로젝트 문서와 진행 근거를 기존 엔진에 연결한다.
+pub mod commands;
 pub mod history;
 pub mod jobs;
 pub mod models;

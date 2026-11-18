@@ -75,12 +75,44 @@ fn completed_receipt_pointer_is_resolved_without_claiming_full_audit() {
 
 #[test]
 fn shared_handover_source_links_only_cross_checked_project() {
- use devdock_core::service::Engine;
- let d=tempfile::tempdir().unwrap();let e=Engine::open(d.path().join("data")).unwrap();let docs=d.path().join("docs");std::fs::create_dir(&docs).unwrap();
- for id in ["Alpha","AlphaVR"]{let root=d.path().join(id);e.mutate(json!({"entity":"project","action":"upsert","value":{"id":id,"name":id,"root":root}}),None).unwrap();}
- std::fs::write(docs.join("HANDOVER_AlphaVR_20260101.md"),format!("# 프로젝트\n{}",d.path().join("AlphaVR").display())).unwrap();
- e.knowledge().upsert_document_source(json!({"sourceId":"global","scope":"global","location":"local","root":docs,"roles":["handover"],"enabled":true}),0).unwrap();
- e.knowledge().scan_with_executable(&[],true,std::path::Path::new(env!("CARGO_BIN_EXE_devdock-cli")),std::time::Duration::from_secs(5)).unwrap();
- assert_eq!(e.knowledge().list_project_documents("AlphaVR",0).unwrap()["documents"].as_array().unwrap().len(),1);
- assert!(e.knowledge().list_project_documents("Alpha",0).unwrap()["documents"].as_array().unwrap().is_empty());
+    use devdock_core::service::Engine;
+    let d = tempfile::tempdir().unwrap();
+    let e = Engine::open(d.path().join("data")).unwrap();
+    let docs = d.path().join("docs");
+    std::fs::create_dir(&docs).unwrap();
+    for id in ["Alpha", "AlphaVR"] {
+        let root = d.path().join(id);
+        e.mutate(
+            json!({"entity":"project","action":"upsert","value":{"id":id,"name":id,"root":root}}),
+            None,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        docs.join("HANDOVER_AlphaVR_20260101.md"),
+        format!("# 프로젝트\n{}", d.path().join("AlphaVR").display()),
+    )
+    .unwrap();
+    e.knowledge().upsert_document_source(json!({"sourceId":"global","scope":"global","location":"local","root":docs,"roles":["handover"],"enabled":true}),0).unwrap();
+    e.knowledge()
+        .scan_with_executable(
+            &[],
+            true,
+            std::path::Path::new(env!("CARGO_BIN_EXE_devdock-cli")),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(
+        e.knowledge().list_project_documents("AlphaVR", 0).unwrap()["documents"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        e.knowledge().list_project_documents("Alpha", 0).unwrap()["documents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

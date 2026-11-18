@@ -260,6 +260,25 @@ pub mod desktop {
             .map_err(|e| e.to_string())?
     }
     #[tauri::command]
+    pub async fn knowledge_command(
+        app: AppHandle,
+        s: State<'_, Runtime>,
+        operation: Value,
+    ) -> Result<Value, String> {
+        let r = s.inner().clone();
+        let read_only = crate::knowledge::commands::read_only(&operation);
+        let value = blocking(move || {
+            r.engine
+                .knowledge()
+                .execute_command(operation, false, r.safe)
+        })
+        .await?;
+        if !read_only {
+            changed(&app);
+        }
+        Ok(value)
+    }
+    #[tauri::command]
     pub async fn get_snapshot(s: State<'_, Runtime>) -> Result<Value, String> {
         let r = s.inner().clone();
         blocking(move || {

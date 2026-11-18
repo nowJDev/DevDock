@@ -137,6 +137,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop::frontend_ready,
+            desktop::knowledge_command,
             desktop::get_snapshot,
             desktop::get_registry,
             desktop::mutate_registry,
