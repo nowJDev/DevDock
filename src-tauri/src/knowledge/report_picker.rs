@@ -1,8 +1,9 @@
 // 등록된 로컬 핸드오버 폴더에서 보고용 파일명과 날짜를 가져온다.
 use super::{err, publish_files::is_unc, KnowledgeService, Result};
 use chrono::{DateTime, Local, NaiveDate};
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::{collections::HashSet, fs, path::Path};
 
 fn report_date(name: &str, metadata: &fs::Metadata) -> Option<NaiveDate> {
     name.split(|character: char| !character.is_ascii_digit())
@@ -27,7 +28,63 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn list_files(root: &Path) -> Result<Vec<Value>> {
+struct ProjectLinks {
+    accepted: HashSet<String>,
+    cannot_inherit: HashSet<String>,
+}
+
+impl ProjectLinks {
+    fn load(db: &Connection, source: &str, project: &str) -> Result<Self> {
+        let mut query = db
+            .prepare(
+                "SELECT d.normalized_path, l.project_id, l.review_state
+                 FROM documents d JOIN document_project_links l USING(document_id)
+                 WHERE d.source_id=?1 AND (l.review_state='accepted' OR l.project_id=?2)
+                   AND (l.review_state!='accepted' OR l.method!='crossChecked' OR EXISTS (
+                     SELECT 1 FROM document_versions v WHERE v.document_id=d.document_id
+                       AND v.sha256=json_extract(d.payload,'$.sha256')
+                       AND json_extract(v.payload,'$.crossCheckedProject')=l.project_id
+                   ))",
+            )
+            .map_err(err)?;
+        let mut accepted = HashSet::new();
+        let mut cannot_inherit = HashSet::new();
+        let mut rows = query.query(params![source, project]).map_err(err)?;
+        while let Some(row) = rows.next().map_err(err)? {
+            let name: String = row.get(0).map_err(err)?;
+            let owner: String = row.get(1).map_err(err)?;
+            let state: String = row.get(2).map_err(err)?;
+            if owner == project && state == "accepted" {
+                accepted.insert(name);
+            } else {
+                cannot_inherit.insert(name);
+            }
+        }
+        Ok(Self {
+            accepted,
+            cannot_inherit,
+        })
+    }
+
+    fn includes(&self, name: &str) -> bool {
+        let normalized = name.to_lowercase();
+        if self.accepted.contains(&normalized) {
+            return true;
+        }
+        if self.cannot_inherit.contains(&normalized) {
+            return false;
+        }
+        normalized
+            .strip_suffix(".snapshot.json")
+            .or_else(|| normalized.strip_suffix(".snapshot"))
+            .is_some_and(|stem| {
+                self.accepted.contains(&format!("{stem}.md"))
+                    || self.accepted.contains(&format!("{stem}.txt"))
+            })
+    }
+}
+
+fn list_files(root: &Path, links: &ProjectLinks) -> Result<Vec<Value>> {
     let metadata = fs::symlink_metadata(root).map_err(err)?;
     if !metadata.is_dir() || is_link(&metadata) {
         return Err("일반 로컬 폴더를 연결해 주세요.".into());
@@ -38,7 +95,8 @@ fn list_files(root: &Path) -> Result<Vec<Value>> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if name.chars().any(char::is_control)
+        if !links.includes(&name)
+            || name.chars().any(char::is_control)
             || !matches!(
                 Path::new(&name)
                     .extension()
@@ -67,7 +125,8 @@ fn list_files(root: &Path) -> Result<Vec<Value>> {
 impl KnowledgeService {
     pub(crate) fn list_report_handover_files(&self, project: &str) -> Result<Value> {
         self.require_project(project)?;
-        let config = self.get_document_config()?;
+        let db = self.db()?;
+        let config = super::store::config(&db)?;
         let mut folders = Vec::new();
         for source in config["sources"]
             .as_array()
@@ -91,8 +150,12 @@ impl KnowledgeService {
             if !path.is_absolute() || is_unc(path) {
                 continue;
             }
-            let mut folder = json!({"sourceId":source["sourceId"],"root":root,"files":[]});
-            match list_files(path) {
+            let source_id = source["sourceId"]
+                .as_str()
+                .ok_or("invalid document source")?;
+            let links = ProjectLinks::load(&db, source_id, project)?;
+            let mut folder = json!({"sourceId":source_id,"root":root,"files":[]});
+            match list_files(path, &links) {
                 Ok(files) => folder["files"] = json!(files),
                 Err(error) => folder["error"] = json!(error),
             }

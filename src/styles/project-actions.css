@@ -63,6 +63,7 @@
   min-width:0;
   margin:0;
 }
+.report-list-actions { margin-bottom:6px; }
 .report-document-list {
   max-height:clamp(100px,24vh,220px);
   overflow:auto;

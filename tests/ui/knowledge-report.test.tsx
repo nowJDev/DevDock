@@ -73,3 +73,26 @@ it('copies the exact prompt for selected files across dates without starting a j
   await user.type(screen.getByLabelText('업무명'),' VR');
   expect(screen.queryByLabelText('Codex 요청문')).toBeNull();
 });
+
+
+it('selects and clears only documents visible under the selected date',async()=>{
+  const {user}=setup();
+  const list=await screen.findByRole('region',{name:'보고에 사용할 문서'});
+  await user.click(within(list).getByRole('checkbox',{name:'HANDOVER_20261116_notes.md'}));
+  await user.selectOptions(screen.getByLabelText('문서 날짜'),'2026-11-17');
+  await user.click(screen.getByRole('button',{name:'전체 선택'}));
+  expect(within(list).getAllByRole('checkbox',{checked:true})).toHaveLength(2);
+  expect(screen.getByText('선택 3개')).toBeInTheDocument();
+  await user.click(screen.getByRole('button',{name:'전체 해제'}));
+  expect(within(list).queryAllByRole('checkbox',{checked:true})).toHaveLength(0);
+  expect(screen.getByText('선택 1개')).toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText('문서 날짜'),'');
+  expect(within(list).getByRole('checkbox',{name:'HANDOVER_20261116_notes.md'})).toBeChecked();
+  await user.click(screen.getByRole('button',{name:'전체 선택'}));
+  expect(within(list).getAllByRole('checkbox',{checked:true})).toHaveLength(4);
+  await user.click(screen.getByRole('button',{name:'Codex 보고 요청'}));
+  expect(screen.getByLabelText<HTMLTextAreaElement>('Codex 요청문').value).toContain('기록/2026-11-18.md');
+  await user.click(screen.getByRole('button',{name:'전체 해제'}));
+  expect(screen.queryByLabelText('Codex 요청문')).toBeNull();
+  expect(screen.getByRole('button',{name:'Codex 보고 요청'})).toBeDisabled();
+});

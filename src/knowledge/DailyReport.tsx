@@ -98,15 +98,24 @@ export default function DailyReport({api,project,returnFocus,onClose}:{
     const unique=[...new Set(files?.map(file=>file.date))];
     return unique.sort((a,b)=>a===unknownDate?1:b===unknownDate?-1:b.localeCompare(a));
   },[files]);
+  const visibleFiles=useMemo(()=>files?.filter(file=>!dateFilter||file.date===dateFilter)??[],[files,dateFilter]);
   const groups=useMemo(()=>{
-    const available=files?.filter(file=>!dateFilter||file.date===dateFilter)??[];
-    return [{title:'핸드오버',files:available.filter(file=>file.handover)},
-      {title:'프로젝트 문서',files:available.filter(file=>!file.handover)}].map(group=>({
+    return [{title:'핸드오버',files:visibleFiles.filter(file=>file.handover)},
+      {title:'프로젝트 문서',files:visibleFiles.filter(file=>!file.handover)}].map(group=>({
         title:group.title,
         dates:dates.map(date=>({date,files:group.files.filter(file=>file.date===date)}))
           .filter(bucket=>bucket.files.length>0),
       }));
-  },[files,dateFilter,dates]);
+  },[visibleFiles,dates]);
+  const allVisibleSelected=visibleFiles.length>0&&visibleFiles.every(file=>selected.includes(file.path));
+
+  function toggleVisibleSelection(){
+    const visiblePaths=new Set(visibleFiles.map(file=>file.path));
+    setSelected(previous=>allVisibleSelected
+      ?previous.filter(path=>!visiblePaths.has(path))
+      :[...new Set([...previous,...visiblePaths])]);
+    clearPrompt();
+  }
 
   function clearPrompt(){
     setPrompt('');
@@ -161,22 +170,29 @@ export default function DailyReport({api,project,returnFocus,onClose}:{
       {warnings.map(warning=><p className="warning-text source-path" key={warning}>{warning}</p>)}
       {files&&<fieldset className="document-roles report-document-picker">
         <legend id={listId}>보고에 사용할 문서</legend>
-        {!groups.some(group=>group.dates.length>0)&&<p className="small">표시할 문서가 없습니다.</p>}
-        {groups.some(group=>group.dates.length>0)&&<div className="report-document-list" role="region" aria-labelledby={listId} tabIndex={0}>
-          {groups.filter(group=>group.dates.length>0).map(group=><section className="report-document-group" key={group.title}>
-            <h3>{group.title}</h3>
-            {group.dates.map(bucket=><div className="report-document-day" key={bucket.date}>
-              <h4>{bucket.date}</h4>
-              {bucket.files.map(file=><label className="candidate-select" key={file.path} title={file.path}>
-                <input type="checkbox" checked={selected.includes(file.path)} onChange={e=>{
-                  const checked=e.target.checked;
-                  setSelected(previous=>checked?[...previous,file.path]:previous.filter(path=>path!==file.path));
-                  clearPrompt();
-                }}/><span>{file.name}</span>
-              </label>)}
-            </div>)}
-          </section>)}
-        </div>}
+        {visibleFiles.length===0&&<p className="small">표시할 문서가 없습니다.</p>}
+        {visibleFiles.length>0&&<>
+          <div className="knowledge-actions report-list-actions">
+            <button className="subtle-button" type="button" aria-controls={listId+'-files'} onClick={toggleVisibleSelection}>
+              {allVisibleSelected?'전체 해제':'전체 선택'}
+            </button>
+          </div>
+          <div id={listId+'-files'} className="report-document-list" role="region" aria-labelledby={listId} tabIndex={0}>
+            {groups.filter(group=>group.dates.length>0).map(group=><section className="report-document-group" key={group.title}>
+              <h3>{group.title}</h3>
+              {group.dates.map(bucket=><div className="report-document-day" key={bucket.date}>
+                <h4>{bucket.date}</h4>
+                {bucket.files.map(file=><label className="candidate-select" key={file.path} title={file.path}>
+                  <input type="checkbox" checked={selected.includes(file.path)} onChange={e=>{
+                    const checked=e.target.checked;
+                    setSelected(previous=>checked?[...previous,file.path]:previous.filter(path=>path!==file.path));
+                    clearPrompt();
+                  }}/><span>{file.name}</span>
+                </label>)}
+              </div>)}
+            </section>)}
+          </div>
+        </>}
       </fieldset>}
       <div className="knowledge-actions report-request-actions">
         <span className="small">선택 {selected.length}개</span>
