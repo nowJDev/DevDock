@@ -5,6 +5,7 @@ import Dialog from '../components/Dialog';
 import type {Project} from '../contracts';
 import type {KnowledgeApi} from './api';
 import type {DocumentSource,ReportProfile} from './contracts';
+import type {DocumentSettingsRequest} from './DocumentSettings';
 import DailyReport from './DailyReport';
 import PublishReview from './PublishReview';
 
@@ -25,10 +26,12 @@ export function ProjectActions({project,onAction}:{
     </button>)}
   </div>;
 }
-export function ProjectActionDialog({api,value,onClose,onSettings}:{
-  api:KnowledgeApi;value:ProjectAction;onClose:()=>void;onSettings:()=>void;
+export function ProjectActionDialog({api,value,onClose,onSettings,onProgressSettings}:{
+  api:KnowledgeApi;value:ProjectAction;onClose:()=>void;onSettings:(request:DocumentSettingsRequest)=>void;
+  onProgressSettings?:(projectId:string)=>void;
 }){
   const {action,project,opener}=value;
+  const openSettings=(sourceId?:string)=>onSettings({projectId:project.id,location:action==='report'?'local':'nas',sourceId});
   const [sources,setSources]=useState<DocumentSource[]|null>(null);
   const [sourceId,setSourceId]=useState(''),[shortcut,setShortcut]=useState('root');
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -43,15 +46,16 @@ export function ProjectActionDialog({api,value,onClose,onSettings}:{
     },e=>{if(active)setError(String(e).replace(/^Error: /,''));});
     return()=>{active=false;};
   },[api,action,project.id]);
-  if(action==='report')return <DailyReport api={api} project={project} returnFocus={opener} onClose={onClose}/>;
+  if(action==='report')return <DailyReport api={api} project={project} returnFocus={opener} onClose={onClose} onSettings={openSettings}/>;
   if(action==='publish'&&sources?.length)return <PublishReview api={api} project={project} sources={sources}
-    opener={opener} defaultSourceId={sourceId} onClose={onClose}/>;
+    opener={opener} defaultSourceId={sourceId} onClose={onClose} onSettings={openSettings}
+    onProgressSettings={onProgressSettings?()=>onProgressSettings(project.id):undefined}/>;
   return <Dialog title={(action==='open'?'NAS 문서 열기':'문서 업데이트')+' · '+project.name} returnFocus={opener} onClose={onClose}>
     {error&&<p className="alert error" role="alert">{error}</p>}
     {!sources&&!error&&<p role="status">NAS 문서 연결을 불러오는 중입니다.</p>}
     {sources?.length===0&&<>
       <p>이 프로젝트에 연결한 NAS 문서 폴더가 없습니다.</p>
-      <div className="modal-actions"><button className="primary-button" onClick={onSettings}>문서 연결 설정 열기</button></div>
+      <div className="modal-actions"><button className="primary-button" onClick={()=>openSettings()}>문서 연결 설정 열기</button></div>
     </>}
     {action==='open'&&!!sources?.length&&<form onSubmit={e=>{
       e.preventDefault();setBusy(true);setError('');

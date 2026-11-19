@@ -1,9 +1,10 @@
 // 일별 진행 기록의 차트와 접근 가능한 표를 렌더링합니다.
-import {useEffect, useId, useMemo, useRef, useState} from 'react';
+import {useEffect, useId, useMemo, useRef, useState, type CSSProperties} from 'react';
 import type {EChartsType} from 'echarts/core';
 import type {DailyProgressPoint} from '../../contracts';
 import {dailyProgressRows, type DailyProgressRow} from './dailyProgress';
 import {progressMetrics as metrics} from './progressMetrics';
+import './dailyProgress.css';
 
 interface DailyProgressChartProps {
   points: DailyProgressPoint[];
@@ -19,20 +20,16 @@ interface MountedChart {
   observer?: ResizeObserver;
 }
 
+type MetricKey = (typeof metrics)[number]['key'];
 
 const chartOptions = {
   animation: false,
   backgroundColor: '#141E2C',
   color: metrics.map(metric => metric.color),
-  grid: {top: 44, right: 24, bottom: 34, left: 48, outerBoundsMode: 'same'},
-  legend: {
-    top: 8,
-    // 계열 범례에는 선만 표시하고 점 모양은 기록 출처에 사용합니다.
-    itemStyle: {opacity: 0},
-    textStyle: {color: '#D4DFEE', fontSize: 12},
-  },
+  grid: {top: 22, right: 24, bottom: 34, left: 48, outerBoundsMode: 'same'},
   tooltip: {
     trigger: 'axis',
+    renderMode: 'richText',
     confine: true,
     transitionDuration: 0,
     backgroundColor: '#233044',
@@ -79,6 +76,24 @@ function SourceTime({value}: {value?: string | null}) {
   return <time dateTime={source}>{display}</time>;
 }
 
+function metricValue(point: DailyProgressPoint | null, key: MetricKey) {
+  return point?.[key] ?? '미기록';
+}
+
+function tooltipText(params: unknown, rows: DailyProgressRow[], provenance: boolean) {
+  const first = Array.isArray(params) ? params[0] : params;
+  const index = first && typeof first === 'object' && 'dataIndex' in first ? Number(first.dataIndex) : -1;
+  const row = rows[index];
+  if (!row) return '';
+  if (!row.point) return row.date + '\n미수집';
+  const title = [row.date];
+  if (provenance) {
+    const origin = row.point.origin === 'observed' ? '실제 수집' : row.point.origin === 'correction' ? '명시적 보정' : '문서 복원';
+    title.push(origin + ' · 기준 v' + (row.point.basisVersion ?? 0));
+  }
+  return [...title, ...metrics.map(metric => metric.label + ' ' + metricValue(row.point, metric.key))].join('\n');
+}
+
 export default function DailyProgressChart({points, days, today, projectName,provenance=false,onSelectDate}: DailyProgressChartProps) {
   const rows = useMemo(() => dailyProgressRows(points, days, today), [points, days, today]);
   const ref = useRef<HTMLDivElement>(null);
@@ -86,11 +101,29 @@ export default function DailyProgressChart({points, days, today, projectName,pro
   const selection=useRef(onSelectDate);selection.current=onSelectDate;
   const visibleRows=useRef(rows);visibleRows.current=rows;
   const [failedRows, setFailedRows] = useState<DailyProgressRow[] | null>(null);
+  const [hiddenMetrics, setHiddenMetrics] = useState<ReadonlySet<MetricKey>>(() => new Set());
+  const [selectedDate, setSelectedDate] = useState<string>();
   const basisNoteId = useId();
   const hasData = rows?.some(row => row.point !== null) ?? false;
   const chartFailed = rows !== null && failedRows === rows;
   const knownBases = new Set(rows?.map(row => row.point?.trackingBasis?.trim()).filter(Boolean));
   const basisChanged = knownBases.size > 1;
+  const comparison = rows?.find(row => row.date === selectedDate) ??
+    rows?.reduce<DailyProgressRow | undefined>((latest, row) => row.point ? row : latest, undefined);
+
+  function toggleMetric(key: MetricKey) {
+    setHiddenMetrics(previous => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function selectDate(date: string) {
+    setSelectedDate(date);
+    selection.current?.(date);
+  }
 
   useEffect(() => () => {
     disposeChart(mountedChart.current);
@@ -99,10 +132,12 @@ export default function DailyProgressChart({points, days, today, projectName,pro
 
   useEffect(() => {
     const element = ref.current;
-    if (!element || !rows || !hasData) return;
+    if (!element || !rows || !hasData || chartFailed) return;
 
     const options = {
       xAxis: {data: rows.map(row => row.date)},
+      // 조작은 HTML 범례로 받고 ECharts의 계열 선택 상태에 반영합니다.
+      legend: {show: false, selected: Object.fromEntries(metrics.map(metric => [metric.label, !hiddenMetrics.has(metric.key)]))},
       series: metrics.map(metric => ({
         id: metric.key,
         data: rows.map(({point}) => {
@@ -112,16 +147,7 @@ export default function DailyProgressChart({points, days, today, projectName,pro
           return {value, symbol: point.origin==='reconstructed'?'diamond':point.origin==='correction'?'triangle':'circle', symbolSize: metric.symbolSize};
         }),
       })),
-      ...(provenance?{tooltip: {renderMode: 'richText', formatter: (params: unknown) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const index = first && typeof first==='object' && 'dataIndex' in first ? Number(first.dataIndex) : -1;
-        const row = rows[index];
-        if (!row?.point) return row?.date ?? '';
-        const point = row.point;
-        const origin = point.origin==='observed'?'실제 수집':point.origin==='correction'?'명시적 보정':'문서 복원';
-        const title = [row.date, origin+' · 기준 v'+(point.basisVersion??0)];
-        return [...title,...metrics.map(metric=>metric.label+' '+(point[metric.key]??'미기록'))].join('\n');
-      }}}:{}),
+      tooltip: {formatter: (params: unknown) => tooltipText(params, rows, provenance)},
     };
 
     function showFallback() {
@@ -132,7 +158,6 @@ export default function DailyProgressChart({points, days, today, projectName,pro
 
     if (mountedChart.current) {
       try {
-        // 데이터만 병합해 사용자가 고른 범례 표시 상태를 보존합니다.
         mountedChart.current.instance.setOption(options);
       } catch {
         showFallback();
@@ -160,6 +185,7 @@ export default function DailyProgressChart({points, days, today, projectName,pro
       mountedChart.current = chart;
       instance.setOption({
         ...chartOptions,
+        legend: options.legend,
         xAxis: {...chartOptions.xAxis, ...options.xAxis},
         tooltip: {...chartOptions.tooltip,...options.tooltip},
         series: metrics.map((metric, index) => ({
@@ -173,7 +199,10 @@ export default function DailyProgressChart({points, days, today, projectName,pro
           lineStyle: {width: 2, type: metric.lineType},
         })),
       });
-      if(selection.current)instance.on('click',(event:{dataIndex?:number})=>{const row=visibleRows.current?.[event.dataIndex??-1];if(row)selection.current?.(row.date);});
+      instance.on('click', (event: {dataIndex?: number}) => {
+        const row = visibleRows.current?.[event.dataIndex ?? -1];
+        if (row) selectDate(row.date);
+      });
       if (typeof ResizeObserver !== 'undefined') {
         chart.observer = new ResizeObserver(() => {
           if (!element.hidden && mountedChart.current === chart) instance.resize();
@@ -185,7 +214,7 @@ export default function DailyProgressChart({points, days, today, projectName,pro
     });
 
     return () => { cancelled = true; };
-  }, [rows, hasData,provenance]);
+  }, [rows, hasData, chartFailed, hiddenMetrics, provenance]);
 
   return <>
     {basisChanged && (
@@ -193,6 +222,22 @@ export default function DailyProgressChart({points, days, today, projectName,pro
         선택한 기간에 집계 기준이 바뀌었습니다. 수치를 비교할 때 일별 데이터 표의 집계 기준을 확인해 주세요.
       </p>
     )}
+    {hasData && !chartFailed && <div className="daily-legend" role="group" aria-label="차트 계열">
+      {metrics.map(metric => <button
+        key={metric.key}
+        type="button"
+        aria-pressed={!hiddenMetrics.has(metric.key)}
+        onClick={() => toggleMetric(metric.key)}
+      >
+        <span
+          className="daily-legend-swatch"
+          data-line={Array.isArray(metric.lineType) ? 'dash-dot' : metric.lineType}
+          style={{'--series-color': metric.color} as CSSProperties}
+          aria-hidden="true"
+        />
+        {metric.label}
+      </button>)}
+    </div>}
     <div
       ref={ref}
       className="daily-chart"
@@ -201,9 +246,20 @@ export default function DailyProgressChart({points, days, today, projectName,pro
       aria-label="프로젝트 일별 진행현황 차트"
       aria-describedby={basisChanged ? basisNoteId : undefined}
     />
-    {!rows && <p className="daily-chart-note">프로젝트가 다른 기록이 포함되어 표시할 수 없습니다.</p>}
-    {rows && !hasData && <p className="daily-chart-note">선택한 기간에 수집한 기록이 아직 없습니다.</p>}
-    {chartFailed && <p className="daily-chart-note" role="status">차트를 표시할 수 없습니다. 일별 데이터 표에서 확인할 수 있습니다.</p>}
+    {(!hasData || chartFailed) && <div className="daily-chart-placeholder">
+      {!rows && <p>프로젝트가 다른 기록이 포함되어 표시할 수 없습니다.</p>}
+      {rows && !hasData && <p>선택한 기간에 수집한 기록이 아직 없습니다.</p>}
+      {chartFailed && <p role="status">차트를 표시할 수 없습니다. 일별 데이터 표에서 확인할 수 있습니다.</p>}
+    </div>}
+    {comparison && <section className="daily-comparison" aria-label="선택한 날짜 진행 수치" aria-live="polite" aria-atomic="true">
+      <time dateTime={comparison.date}>{comparison.date}</time>
+      <dl>
+        {metrics.map(metric => <div key={metric.key}>
+          <dt>{metric.label}</dt>
+          <dd>{metricValue(comparison.point, metric.key)}</dd>
+        </div>)}
+      </dl>
+    </section>}
     {provenance&&<p className="daily-chart-note">원형은 실제 수집, 마름모는 문서 복원, 삼각형은 명시적 보정입니다. 날짜를 선택해 업무와 근거를 확인할 수 있습니다.</p>}
     {rows && <details>
       <summary>일별 데이터 표</summary>
@@ -223,9 +279,11 @@ export default function DailyProgressChart({points, days, today, projectName,pro
           <tbody>
             {rows.map(({date, point}) => (
               <tr key={date}>
-                <th scope="row">{onSelectDate?<button type="button" className="text-button" aria-label={date+' 근거 보기'} onClick={()=>onSelectDate(date)}>{date}</button>:date}</th>
+                <th scope="row">{(onSelectDate || point)
+                  ? <button type="button" className="text-button daily-date-button" aria-label={date+(onSelectDate?' 근거 보기':' 수치 보기')} aria-current={comparison?.date===date?'date':undefined} onClick={()=>selectDate(date)}>{date}</button>
+                  : date}</th>
                 {point ? <>
-                  {metrics.map(metric => <td key={metric.key}>{point[metric.key]??'미기록'}</td>)}
+                  {metrics.map(metric => <td key={metric.key}>{metricValue(point, metric.key)}</td>)}
                   <td><time dateTime={point.at}>{collectionTime.format(new Date(point.at))}</time></td>
                   <td>{point.trackingBasis?.trim() ? point.trackingBasis : '미기록'}</td>
                   <td><SourceTime value={point.sourceCapturedAt}/></td>

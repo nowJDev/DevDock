@@ -22,6 +22,25 @@ function HistoryFixture({api,today}:{api:KnowledgeApi;today:string}){
 function point(date:string,origin:HistoryPoint['origin'],version=1):HistoryPoint{return {date,basisVersion:version,counts:{total:8,verified:0,reportedComplete:6,inProgress:1,blocked:0},origin,coverage:'complete',capturedAt:date+'T12:00:00Z',sourceSpans:[{versionId:'v',sha256:'hash',locator:{lines:{start:1,end:2}}}]};}
 function history(points:HistoryPoint[]):ProjectHistory{return {projectId:'p',basisId:'dev',from:'2026-01-01',through:'2026-01-03',points,workEntries:[]};}
 describe('근거가 있는 과거 진행 차트',()=>{
+ it('keeps a date comparison and an open table while loading a different range for the same basis',async()=>{
+  chart.init.mockReturnValue(chart);
+  let finish!:(value:ProjectHistory)=>void;
+  const first={...history([point('2026-01-01','observed',0)]),basisId:'legacy',from:'2025-12-28'};
+  const f=knowledgeFixture({history:vi.fn().mockResolvedValueOnce(first).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}))});
+  const user=userEvent.setup();
+  render(<HistoryFixture api={f.api} today="2026-01-03"/>);
+  await user.click(await screen.findByText('일별 데이터 표'));
+  const table=screen.getByRole('table');
+  const canvas=screen.getByRole('img');
+  await user.selectOptions(screen.getByLabelText('기준별 차트 기간'),'30');
+  expect(screen.getByRole('status')).toHaveTextContent('2025-12-28 ~ 2026-01-03 표시 중');
+  expect(screen.getByRole('img')).toBe(canvas);
+  expect(within(table).getAllByRole('row')).toHaveLength(8);
+  await act(async()=>finish({...first,from:'2025-12-05'}));
+  expect(screen.getByRole('img')).toBe(canvas);
+  expect(within(table).getAllByRole('row')).toHaveLength(31);
+  expect(screen.getByRole('region',{name:'선택한 날짜 진행 수치'})).toHaveTextContent('2026-01-01');
+ });
  it('chart_separates_basis_and_origin_and_incomplete_counts',()=>{const h=history([point('2026-01-01','observed'),point('2026-01-02','reconstructed'),point('2026-01-03','correction',2),{...point('2026-01-03','reconstructed'),coverage:'partial',counts:null}]);const values=historyChartPoints(h,1,'개발');expect(values).toHaveLength(2);expect(values.map(p=>p.origin)).toEqual(['observed','reconstructed']);expect(values.every(p=>p.basisVersion===1)).toBe(true);expect(rangeDays('2026-01-01','2026-04-30')).toBe(120);expect(rangeDays('2026-01-01','2027-01-02')).toBeNull();expect(rangeDays('2026-02-30','2026-03-01')).toBeNull();});
  it('chart_and_table_open_same_source',async()=>{chart.init.mockReturnValue(chart);const f=knowledgeFixture({history:vi.fn(async(_p,_b,from,through)=>({...history([point('2026-01-01','reconstructed',0)]),basisId:'legacy',from,through})),read:vi.fn(async()=>({versionId:'v',sha256:'hash',start:1,totalLines:2,text:'원문 업무 근거'}))}),user=userEvent.setup();render(<HistoryFixture api={f.api} today="2026-01-03"/>);await user.click(await screen.findByText('일별 데이터 표'));const button=screen.getByRole('button',{name:'2026-01-01 근거 보기'});await user.click(button);expect(await screen.findByRole('dialog')).toHaveTextContent('문서 복원');expect(screen.getByRole('dialog')).toHaveTextContent('진행 중 1');await user.click(screen.getByRole('button',{name:'원문 근거 보기'}));expect(await screen.findByText('원문 업무 근거')).toBeInTheDocument();expect(f.api.read).toHaveBeenCalledWith('v',1,200);await user.keyboard('{Escape}');await waitFor(()=>expect(button).toHaveFocus());const handler=chart.on.mock.calls.find(call=>call[0]==='click')?.[1] as ((value:{dataIndex:number})=>void)|undefined;expect(handler).toBeTypeOf('function');act(()=>handler!({dataIndex:4}));expect(screen.getByRole('dialog')).toHaveTextContent('2026-01-01');});
  it('slow_query_preserves_canvas_and_only_manual_refresh_reads_again',async()=>{chart.init.mockReturnValue(chart);let finish!:(value:ProjectHistory)=>void;const f=knowledgeFixture({history:vi.fn().mockResolvedValueOnce({...history([point('2026-01-01','observed',0)]),basisId:'legacy'}).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}))}),user=userEvent.setup();render(<HistoryFixture api={f.api} today="2026-01-03"/>);const canvas=await screen.findByRole('img',{name:'프로젝트 일별 진행현황 차트'});await waitFor(()=>expect(chart.setOption).toHaveBeenCalled());await user.click(screen.getByRole('button',{name:'기준별 차트 새로고침'}));expect(screen.getByRole('img',{name:'프로젝트 일별 진행현황 차트'})).toBe(canvas);await act(async()=>{finish({...history([point('2026-01-02','observed',0)]),basisId:'legacy'});});expect(f.api.history).toHaveBeenCalledTimes(2);expect(chart.init).toHaveBeenCalledTimes(1);});

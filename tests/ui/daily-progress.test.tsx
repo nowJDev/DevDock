@@ -11,6 +11,7 @@ const chart = vi.hoisted(() => ({
   setOption: vi.fn(),
   dispose: vi.fn(),
   resize: vi.fn(),
+  on: vi.fn(),
 }));
 vi.mock('echarts/core', () => ({init: chart.init, use: vi.fn()}));
 vi.mock('echarts/charts', () => ({LineChart: vi.fn()}));
@@ -79,6 +80,40 @@ describe('daily progress rows', () => {
 });
 
 describe('DailyProgressChart', () => {
+  it('lets keyboard users compare overlapping values by date and toggle individual series', async () => {
+    const user = userEvent.setup();
+    const points = [
+      point('2026-03-09', {verified: 0, reportedComplete: 0}),
+      point(today, {verified: 1, reportedComplete: 1, inProgress: 1}),
+    ];
+    const {rerender} = render(<DailyProgressChart points={points} days={7} today={today} projectName="DevDock"/>);
+    const legend = screen.getByRole('group', {name: '차트 계열'});
+    const verified = within(legend).getByRole('button', {name: '검증 완료'});
+    expect(verified).toHaveAttribute('aria-pressed', 'true');
+    verified.focus();
+    await user.keyboard('{Enter}');
+    expect(verified).toHaveAttribute('aria-pressed', 'false');
+    const comparison = screen.getByRole('region', {name: '선택한 날짜 진행 수치'});
+    expect(within(comparison).getAllByRole('definition').map(value => value.textContent)).toEqual(['4', '1', '1', '1']);
+    expect(comparison).toHaveTextContent(today);
+    await waitFor(() => expect(chart.setOption).toHaveBeenCalled());
+    const formatter = chart.setOption.mock.lastCall?.[0].tooltip.formatter;
+    expect(formatter([{dataIndex: 6}])).toBe(
+      today + '\n전체 작업 4\n검증 완료 1\n미검증 완료 보고 1\n진행 중 1',
+    );
+
+    await user.click(screen.getByText('일별 데이터 표'));
+    within(screen.getByRole('table')).getByRole('button', {name: '2026-03-09 수치 보기'}).focus();
+    await user.keyboard('{Enter}');
+    expect(comparison).toHaveTextContent('2026-03-09');
+    expect(within(comparison).getAllByRole('definition').map(value => value.textContent)).toEqual(['4', '0', '0', '미기록']);
+
+    rerender(<DailyProgressChart points={points} days={30} today={today} projectName="DevDock"/>);
+    expect(screen.getByRole('table')).toBeVisible();
+    expect(comparison).toHaveTextContent('2026-03-09');
+    expect(verified).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('uses the same dates, gaps, and changing counts in the chart and keyboard-accessible table', async () => {
     const user = userEvent.setup();
     const first = point('2026-03-04', {total: 0, verified: 0, reportedComplete: 0});
@@ -107,6 +142,10 @@ describe('DailyProgressChart', () => {
       ],
     })));
 
+    for (const label of ['전체 작업', '검증 완료', '미검증 완료 보고', '진행 중']) {
+      await user.tab();
+      expect(within(screen.getByRole('group', {name: '차트 계열'})).getByRole('button', {name: label})).toHaveFocus();
+    }
     await user.tab();
     expect(screen.getByText('일별 데이터 표')).toHaveFocus();
     await user.keyboard('{Enter}');
@@ -132,6 +171,7 @@ describe('DailyProgressChart', () => {
   });
 
   it('updates an existing ECharts instance without resetting a hidden legend series', async () => {
+    const user = userEvent.setup();
     const echarts = await vi.importActual<typeof import('echarts')>('echarts');
     echarts.setPlatformAPI({measureText: text => ({width: text.length * 8})});
     const instances: ReturnType<typeof echarts.init>[] = [];
@@ -151,7 +191,7 @@ describe('DailyProgressChart', () => {
     });
     await waitFor(() => expect(instances[0]?.getOption()).toMatchObject(totalSeries(4)));
     const instance = instances[0];
-    instance.dispatchAction({type: 'legendToggleSelect', name: '미검증 완료 보고'});
+    await user.click(within(screen.getByRole('group', {name: '차트 계열'})).getByRole('button', {name: '미검증 완료 보고'}));
     const hiddenLegend = {legend: [{selected: {'미검증 완료 보고': false}}]};
     expect(instance.getOption()).toMatchObject(hiddenLegend);
 
@@ -181,17 +221,11 @@ describe('DailyProgressChart', () => {
         data: ['circle', 'diamond', 'triangle'].map(symbol => expect.objectContaining({value, symbol})),
       })),
     }));
-    const svg = new DOMParser().parseFromString(instance.renderToSVGString(), 'image/svg+xml');
-    const legendPositions = new Set([...svg.querySelectorAll('[ecmeta_ssr_type="legend"]')]
-      .map(hitArea => hitArea.getAttribute('transform')));
-    const visibleSwatches = [...svg.querySelectorAll('path[transform]')].filter(path =>
-      legendPositions.has(path.getAttribute('transform')) &&
-      !path.hasAttribute('ecmeta_ssr_type') &&
-      path.getAttribute('fill-opacity') !== '0',
-    );
-    expect(visibleSwatches).toHaveLength(4);
-    expect(visibleSwatches.every(swatch => swatch.hasAttribute('stroke'))).toBe(true);
-    expect(new Set(visibleSwatches.map(swatch => swatch.getAttribute('stroke-dasharray'))).size).toBe(4);
+    const legend = screen.getByRole('group', {name: '차트 계열'});
+    const visibleSwatches = [...legend.querySelectorAll('[data-line]')];
+    expect(visibleSwatches.map(swatch => swatch.getAttribute('data-line'))).toEqual(['solid', 'dashed', 'dotted', 'dash-dot']);
+    expect(visibleSwatches.map(swatch => (swatch as HTMLElement).style.getPropertyValue('--series-color')))
+      .toEqual(['#A7B5C9', '#62B5FF', '#FFB454', '#5AD2A0']);
   });
 
   it('shows historical collection bases and warns only when known bases differ in the selected period', async () => {

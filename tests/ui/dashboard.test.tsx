@@ -38,7 +38,14 @@ describe('DevDock dashboard',()=>{
   expect(summary).toHaveTextContent('출근 08:15');
   expect(summary).toHaveTextContent('퇴근 기록 확인 전');
   const chart=screen.getByRole('region',{name:'프로젝트 일별 진행현황'});
-  expect(summary.compareDocumentPosition(chart)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const projects=screen.getByRole('region',{name:/프로젝트 진행상황/});
+  expect(summary.compareDocumentPosition(projects)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(projects.compareDocumentPosition(chart)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(projects).getByRole('button',{name:'DevDock 일일보고'})).toBeVisible();
+  expect(screen.getAllByText('A daemon',{exact:true})).toHaveLength(1);
+  const daemon=within(summary).getByText('A daemon').closest('details')!;
+  await userEvent.click(within(daemon).getByText('A daemon'));
+  expect(within(daemon).getByText('접근 권한을 확인해 주세요.')).toBeVisible();
  });
 
  it('focuses an opened project detail and restores focus to its selected row',async()=>{
@@ -247,6 +254,37 @@ describe('DevDock dashboard',()=>{
   expect(api.history).toHaveBeenCalledTimes(2);
  });
 
+ it('retains the displayed period, canvas and open table through a failed period change and retry',async()=>{
+  const {api,snapshot}=fixture();
+  snapshot.now=new Date(2026,10,17,0,15).toISOString();
+  const history=(total:number):History=>({monitorId:'p1',points:[],progress:[],dailyProgress:[
+   {projectId:'p1',date:'2026-11-17',at:snapshot.now,total,verified:1,reportedComplete:1},
+  ]});
+  let rejectPeriod!:(reason:Error)=>void;
+  vi.mocked(api.history).mockResolvedValueOnce(history(7))
+   .mockImplementationOnce(()=>new Promise((_resolve,reject)=>{rejectPeriod=reject;}))
+   .mockResolvedValueOnce(history(30));
+  const user=userEvent.setup();
+  render(<App api={api}/>);
+  const panel=within(await screen.findByRole('region',{name:'프로젝트 일별 진행현황'}));
+  await user.click(await panel.findByText('일별 데이터 표'));
+  const chart=panel.getByRole('img',{name:'프로젝트 일별 진행현황 차트'});
+  const table=panel.getByRole('table');
+  await user.selectOptions(panel.getByRole('combobox',{name:'진행현황 기간'}),'30');
+  expect(panel.getByRole('status')).toHaveTextContent('최근 7일 표시 중 · 최근 30일 불러오는 중');
+  expect(panel.getByRole('img')).toBe(chart);
+  expect(within(table).getAllByRole('row')).toHaveLength(8);
+  await act(async()=>rejectPeriod(new Error('기간 조회 실패')));
+  expect(panel.getByRole('alert')).toHaveTextContent('기간 조회 실패');
+  expect(panel.getByRole('img')).toBe(chart);
+  expect(within(table).getByRole('cell',{name:'7'})).toBeVisible();
+  await user.click(panel.getByRole('button',{name:'다시 조회'}));
+  await waitFor(()=>expect(within(table).getAllByRole('row')).toHaveLength(31));
+  expect(panel.getByRole('img')).toBe(chart);
+  expect(within(table).getByRole('cell',{name:'30'})).toBeVisible();
+  expect(api.history).toHaveBeenLastCalledWith('p1',720);
+ });
+
  it('keeps daily data until manual refresh despite background updates',async()=>{
   const {api,snapshot,listeners}=fixture();
   snapshot.now=new Date(2026,10,17,0,15).toISOString();
@@ -438,6 +476,7 @@ describe('DevDock dashboard',()=>{
   Object.assign(snapshot.attendance,{serverState:'unknown',lastRunsByAction:{checkIn:run,checkOut:null},runs:[run]});
   const user=userEvent.setup();render(<App api={api}/>);
   expect(await screen.findByText(/서버 상태.*확인 불가/)).toBeInTheDocument();
+  await userEvent.click(screen.getByText('오늘의 근태'));
   expect(within(screen.getByRole('region',{name:'오늘의 근태'})).getByText('출근 결과 확인 필요')).toBeVisible();
   expect(screen.getByText(/UNCERTAIN/)).not.toBeVisible();
   await user.click(screen.getByText('근태 실행 이력'));
@@ -472,6 +511,33 @@ describe('DevDock dashboard',()=>{
  it('saves settings once with the original revision and preserves conflicting edits',async()=>{const {api,snapshot,listeners}=fixture();Object.assign(snapshot.settings,{revision:1});api.saveSettings=vi.fn(async s=>{if(s.revision!==snapshot.settings.revision)throw new Error('revision conflict');return {...s,revision:s.revision+1};});const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getAllByRole('button',{name:'설정'})[0]);await user.selectOptions(screen.getByLabelText('원시 관측 보존 기간'),'14');snapshot.settings={...snapshot.settings,revision:2,attendanceEnabled:false};listeners.get('dashboard-updated')!(null);await waitFor(()=>expect(api.snapshot).toHaveBeenCalledTimes(2));await user.click(screen.getByRole('button',{name:'설정 저장'}));expect(await screen.findByRole('alert')).toHaveTextContent(/충돌|conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');expect(api.setAutostart).not.toHaveBeenCalled();await act(async()=>{listeners.get('dashboard-updated')!(null);});expect(screen.getByRole('alert')).toHaveTextContent(/conflict/);expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('14');await user.click(screen.getByRole('button',{name:'최신 설정 불러오기'}));expect(screen.queryByRole('alert')).not.toBeInTheDocument();expect(screen.getByLabelText('원시 관측 보존 기간')).toHaveValue('7');expect(screen.getByLabelText(/출근·퇴근 확인 알림/)).not.toBeChecked();await user.click(screen.getByRole('button',{name:'설정 저장'}));await waitFor(()=>expect(api.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({revision:2,attendanceEnabled:false})));});
 
  it('informs the user when a dated checkout prompt expires',async()=>{const {api,listeners}=fixture();api.answerCheckout=vi.fn(async()=>({expired:true,date:'2026-11-17',answer:false}));const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');listeners.get('checkout-prompt')!({date:'2026-11-17'});await user.click(await screen.findByRole('button',{name:'실행'}));expect(await screen.findByText(/만료되어 실행되지 않았습니다/)).toBeInTheDocument();});
+ it('associates an invalid attendance range with the end time and focuses it',async()=>{
+  const {api}=fixture();const user=userEvent.setup();render(<App api={api}/>);
+  await user.click(screen.getByRole('button',{name:'설정'}));
+  const start=await screen.findByLabelText('출근 확인 시작');
+  const end=screen.getByLabelText('출근 확인 종료 미만');
+  fireEvent.change(start,{target:{value:'12:00'}});
+  await user.click(screen.getByRole('button',{name:'설정 저장'}));
+  expect(end).toHaveFocus();
+  expect(end).toHaveAttribute('aria-invalid','true');
+  expect(end).toHaveAccessibleDescription('종료 시간은 시작 시간보다 늦어야 합니다.');
+  expect(screen.queryByRole('button',{name:'최신 설정 불러오기'})).not.toBeInTheDocument();
+  expect(api.saveSettings).not.toHaveBeenCalled();
+ });
+
+ it('shows attendance save errors beside the submit button and retains inputs',async()=>{
+  const {api}=fixture();vi.mocked(api.saveSettings).mockRejectedValueOnce(Error('저장 장치 오류'));
+  const user=userEvent.setup();render(<App api={api}/>);
+  await user.click(screen.getByRole('button',{name:'설정'}));
+  const end=await screen.findByLabelText('출근 확인 종료 미만');
+  fireEvent.change(end,{target:{value:'08:25'}});
+  const submit=screen.getByRole('button',{name:'설정 저장'});
+  await user.click(submit);
+  expect(await within(submit.closest('.settings-footer') as HTMLElement).findByRole('alert')).toHaveTextContent('저장 장치 오류');
+  expect(end).toHaveValue('08:25');
+  expect(screen.queryByRole('button',{name:'최신 설정 불러오기'})).not.toBeInTheDocument();
+ });
+
  it('submits settings only once and keeps the revision',async()=>{const {api}=fixture();const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getAllByRole('button',{name:'설정'})[0]);await user.click(screen.getByLabelText(/Windows 로그인 시 시작/));await user.click(screen.getByRole('button',{name:'설정 저장'}));await waitFor(()=>expect(api.saveSettings).toHaveBeenCalledTimes(1));expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({revision:1,autostartEnabled:true}));expect(api.setAutostart).not.toHaveBeenCalled();});
  it('keeps a remove confirmation revision when registry changes',async()=>{const {api,listeners,changeRegistry}=fixture();const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');await user.click(screen.getByRole('button',{name:'모니터링'}));await user.click(screen.getByRole('button',{name:'빌드 결과 제거'}));changeRegistry();listeners.get('dashboard-updated')!(null);await waitFor(()=>expect(api.registry).toHaveBeenCalledTimes(2));await user.click(screen.getByRole('button',{name:'항목 제거'}));expect(await screen.findByRole('alert')).toHaveTextContent(/conflict/);expect(screen.getByRole('dialog')).toBeInTheDocument();});
 
@@ -500,7 +566,7 @@ it('keeps the current runtime summary without an activity feed or history page',
   const {api,snapshot}=fixture();
   snapshot.events=[{id:'example',daemonId:'A',type:'turn/started',at:snapshot.now,message:'활동 테스트 이벤트'}];
   render(<App api={api}/>);
-  expect(await screen.findByRole('heading',{name:'런타임 현재 상태'})).toBeInTheDocument();
+  expect(await screen.findByRole('region',{name:'데몬·근태 요약'})).toBeInTheDocument();
   const navigation=screen.getByRole('navigation',{name:'주요 탐색'});
   expect(within(navigation).queryByRole('button',{name:'활동 이력'})).toBeNull();
   expect(screen.queryByRole('heading',{name:'최근 활동'})).toBeNull();

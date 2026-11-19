@@ -80,6 +80,35 @@ nav button svg,.metrics svg,.project-row-end svg,.section-heading>svg{flex:none}
 .monitor-details{margin-top:1px}
 .monitor-details summary{width:fit-content}
 .settings-footer{gap:8px}
+.settings-footer{align-items:center;flex-wrap:wrap}
+.settings-footer p{flex:1 1 220px;margin:0;overflow-wrap:anywhere}
+.settings-time{flex:1;min-width:0}
+.settings-field-error{display:block;margin-top:5px;color:#ffb6c0;font-size:12px;line-height:1.6}
+.time-inputs input[aria-invalid=true]{border-color:#d47889}
+.document-settings .document-source-editor{margin:8px 0 12px}
+.document-editor-error{margin:12px 0}
+.editor-path{overflow-wrap:anywhere}
+.operations-item{min-width:0}
+.operations-item+.operations-item{border-inline-start:1px solid var(--border)}
+.operations-item>summary{min-height:43px;list-style:none}
+.operations-item>summary::-webkit-details-marker{display:none}
+.operations-item>summary:hover{background:#263246}
+.operations-item>summary:focus-visible{outline-offset:-3px}
+.operations-summary-item .operations-chevron{margin-inline-start:auto;color:var(--muted)}
+.operations-item[open]>summary .operations-chevron{transform:rotate(180deg)}
+.operations-details{margin:0;padding:0 12px 12px;min-width:0;overflow-wrap:anywhere}
+.operations-details .daemon-main{margin-top:4px}
+.operations-details footer{margin-top:8px;color:var(--muted);font-size:12px}
+.operations-details footer>span{display:flex;align-items:center;gap:5px}
+.attendance-policy{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:4px}
+.attendance-policy p{margin:0;color:var(--muted);font-size:12px}
+.operations-details .attendance-times{padding:0}
+.operations-details .attendance-message,.operations-details .attendance-log{margin-inline:0}
+@media(max-width:1050px){
+ .operations-summary{grid-template-columns:repeat(2,minmax(0,1fr)) minmax(0,1.55fr)}
+ .operations-summary-item{gap:5px 6px}
+ .project-panel .project-row{align-items:start}
+}
 @media(max-width:1250px){
  .sidebar{width:176px;min-width:176px}
  .main-shell{margin-left:176px}

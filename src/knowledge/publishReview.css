@@ -1,0 +1,45 @@
+/* NAS 변경 비교는 본문에서 스크롤하고 실행 조건과 결과는 하단에 배치한다. */
+.publish-dialog.modal {
+  display: flex;
+  flex-direction: column;
+  max-height: min(90vh, calc(100vh - 48px));
+  overflow: hidden;
+}
+
+.publish-dialog > header {
+  flex: none;
+  margin-bottom: 12px;
+}
+
+.publish-dialog .publish-dialog-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 4px 8px;
+}
+
+.publish-dialog-footer {
+  display: grid;
+  flex: none;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.publish-dialog-footer p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.publish-dialog-footer .alert {
+  max-height: 18vh;
+  overflow: auto;
+}
+
+.publish-requirements {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 20px;
+  line-height: 1.45;
+}

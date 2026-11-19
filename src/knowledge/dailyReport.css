@@ -1,0 +1,54 @@
+/* 일일보고의 폴더 오류, 빈 목록과 날짜별 선택 요약을 표시한다. */
+.report-source-problems,
+.report-empty,
+.report-selection {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.report-source-problems > button,
+.report-empty > button {
+  justify-self: start;
+}
+.report-source-problems .alert,
+.report-source-problems p,
+.report-empty p {
+  margin: 0;
+}
+.report-source-problems .alert {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.report-source-problems ul {
+  max-height: 100px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding-inline-start: 20px;
+}
+.report-selected-files {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 10px;
+}
+.report-selected-day h3 {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.report-selected-day ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.report-selected-day li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.report-selected-day li button {
+  flex: none;
+}

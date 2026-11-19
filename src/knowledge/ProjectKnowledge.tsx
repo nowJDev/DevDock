@@ -1,5 +1,5 @@
 // 프로젝트의 진행 기준·작업 기록·원문과 검토 가져오기를 탭으로 연결한다.
-import {useEffect,useId,useMemo,useRef,useState,type ReactNode} from 'react';
+import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState,type ReactNode} from 'react';
 import type {ProjectProgress} from '../contracts';
 import Dialog from '../components/Dialog';
 import type {KnowledgeApi} from './api';
@@ -14,11 +14,19 @@ function before(date:string,days:number){const d=new Date(date+'T00:00:00Z');d.s
 const errorText=(e:unknown)=>String(e).replace(/^Error: /,'');
 type Reader={doc:DocumentVersion;start:number;text:string;totalLines:number;returnFocus:HTMLElement|null};
 type BasisEdit={basisId:string;version:number;name:string;kind:ProgressBasis['kind'];lines:string;revision:number;previous?:ProgressBasis;connectSources:boolean};
-export default function ProjectKnowledge({api,project,refreshVersion,children}:{api:KnowledgeApi;project:ProjectProgress;refreshVersion:number;children?:ReactNode}){
+export default function ProjectKnowledge({api,project,refreshVersion,children,checklistRequest}:{api:KnowledgeApi;project:ProjectProgress;refreshVersion:number;children?:ReactNode;checklistRequest?:{projectId:string}}){
  const [tab,setTab]=useState('overview'),[activated,setActivated]=useState(false),[view,setView]=useState<ProjectProgressView|null>(null),[selectedBasis,setSelectedBasis]=useState<string>(),[docs,setDocs]=useState<DocumentVersion[]>([]),[page,setPage]=useState(0),[hasMore,setHasMore]=useState(false),[unlinked,setUnlinked]=useState<DocumentVersion[]|null>(null),[selection,setSelection]=useState<string[]>([]),[jobs,setJobs]=useState<AnalysisJob[]>([]),[preview,setPreview]=useState<ImportPreview|null>(null),[reader,setReader]=useState<Reader|null>(null),[editing,setEditing]=useState<BasisEdit|null>(null),[cutover,setCutover]=useState<{basisId:string;revision:number}|null>(null),[error,setError]=useState(''),[loadError,setLoadError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[reload,setReload]=useState(0),[from,setFrom]=useState(()=>before(today(),29)),[through,setThrough]=useState(today),[history,setHistory]=useState<ProjectHistory|null>(null),[batches,setBatches]=useState<{batchId:string;active:boolean;createdAt?:string}[]>([]),[legacyPreview,setLegacyPreview]=useState<{previewHash:string;expectedProjectRevision:number;points:unknown[]}|null>(null);
  const [analysisVersion,setAnalysisVersion]=useState<number>();
  const panelId=useId(),generation=useRef(0),documentsReload=useRef(-1),tabRefs=useRef<(HTMLButtonElement|null)[]>([]);
  const loaded=activated||project.progressMode==='managed';
+ useLayoutEffect(()=>{
+  if(!checklistRequest)return;
+  setTab('checklist');
+  setActivated(true);
+  const button=tabRefs.current[tabs.findIndex(([id])=>id==='checklist')];
+  button?.focus({preventScroll:true});
+  button?.scrollIntoView?.({block:'nearest'});
+ },[checklistRequest]);
  useEffect(()=>{if(!loaded)return;let current=true;const id=++generation.current;void Promise.all([api.progress(project.id,selectedBasis),api.documents(project.id),api.jobs(project.id)]).then(([p,d,j])=>{if(!current||id!==generation.current)return;setView(p);if(documentsReload.current!==reload){setDocs(d.documents);setPage(0);setHasMore(d.documents.length===100);documentsReload.current=reload;}else{setDocs(old=>[...new Map([...d.documents,...old].map(doc=>[doc.versionId,doc])).values()]);}setJobs(j.jobs);setLoadError('');},e=>{if(current)setLoadError(errorText(e));});return()=>{current=false;};},[api,project.id,selectedBasis,loaded,refreshVersion,reload]);
  useEffect(()=>{if(tab!=='work'||!loaded)return;let active=true;void Promise.all([api.history(project.id,selectedBasis??view?.basis?.basisId??'legacy',from,through),api.execute<{batches:typeof batches}>('list_import_batches',{projectId:project.id})]).then(([h,b])=>{if(active){setHistory(h);setBatches(b.batches??[]);}},e=>{if(active)setError(errorText(e));});return()=>{active=false;};},[api,project.id,tab,selectedBasis,view?.revision,reload,loaded]);
  const currentBasis=view?.basis??null;

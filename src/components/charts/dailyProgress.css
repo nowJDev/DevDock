@@ -1,0 +1,131 @@
+/* 일별 진행 차트의 계열 범례, 날짜별 수치와 조회 상태를 표시합니다. */
+.daily-request-status {
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.daily-chart-placeholder {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  padding: 16px;
+  border-radius: 6px;
+  background: #141e2c;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.daily-chart-placeholder p {
+  margin: 0;
+}
+
+.daily-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.daily-legend button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #17212f;
+  color: #d4dfee;
+  font-size: 12px;
+}
+
+.daily-legend button[aria-pressed='false'] {
+  color: var(--muted);
+  background: transparent;
+  text-decoration: line-through;
+}
+
+.daily-legend button:focus-visible,
+.daily-date-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.daily-legend-swatch {
+  display: block;
+  width: 22px;
+  flex: 0 0 auto;
+  border-top: 2px solid var(--series-color);
+}
+
+.daily-legend-swatch[data-line='dashed'] {
+  border-top-style: dashed;
+}
+
+.daily-legend-swatch[data-line='dotted'] {
+  border-top-style: dotted;
+}
+
+.daily-legend-swatch[data-line='dash-dot'] {
+  height: 2px;
+  border: 0;
+  background: repeating-linear-gradient(
+    to right,
+    var(--series-color) 0 8px,
+    transparent 8px 11px,
+    var(--series-color) 11px 12px,
+    transparent 12px 15px
+  );
+}
+
+.daily-comparison {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #d4dfee;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.daily-comparison dl,
+.daily-comparison dl > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.daily-comparison dl > div {
+  gap: 5px;
+}
+
+.daily-comparison dt {
+  color: var(--muted);
+}
+
+.daily-comparison dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.daily-table .daily-date-button {
+  min-height: 28px;
+  padding: 5px 0;
+  white-space: nowrap;
+}
+
+.daily-date-button[aria-current='date'] {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

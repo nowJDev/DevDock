@@ -6,6 +6,23 @@ import DocumentSettings from '../../src/knowledge/DocumentSettings';
 import App from '../../src/App';
 import {knowledgeFixture,dashboardFixture,sampleProjects} from './knowledge-fixture';
 describe('문서 연결 설정',()=>{
+ it('opens the folder editor before registered folders and restores the initiating focus',async()=>{
+  const f=knowledgeFixture(),user=userEvent.setup();
+  f.setConfig({revision:1,nasIntervalSec:30,localIntervalSec:5,sources:[{sourceId:'existing',scope:'project',projectId:'p',location:'local',root:'C:/문서',roles:['handover'],enabled:true}]});
+  render(<DocumentSettings api={f.api} projects={sampleProjects} refreshVersion={0}/>);
+  const add=await screen.findByRole('button',{name:'문서 폴더 추가'});
+  const edit=screen.getByRole('button',{name:'문서 연결 수정'});
+  await user.click(add);
+  expect(screen.getByLabelText('저장 위치')).toHaveFocus();
+  expect(screen.getByRole('heading',{name:'새 문서 폴더'}).compareDocumentPosition(edit)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await user.click(screen.getByRole('button',{name:'문서 편집 취소'}));
+  expect(add).toHaveFocus();
+  await user.click(edit);
+  expect(screen.getByLabelText('문서 폴더 경로')).toHaveFocus();
+  await user.click(screen.getByRole('button',{name:'문서 편집 취소'}));
+  expect(edit).toHaveFocus();
+ });
+
  it('source_save_preserves_pending_interval_edit',async()=>{
   const f=knowledgeFixture(),user=userEvent.setup();render(<DocumentSettings api={f.api} projects={sampleProjects} refreshVersion={0}/>);const interval=await screen.findByLabelText('NAS 확인 간격 (초)');await user.clear(interval);await user.type(interval,'60');await user.click(screen.getByRole('button',{name:'문서 폴더 추가'}));await user.type(screen.getByLabelText('문서 폴더 경로'),'C:/문서');await user.click(screen.getByRole('button',{name:'문서 폴더 저장'}));await waitFor(()=>expect(screen.queryByLabelText('문서 폴더 경로')).not.toBeInTheDocument());expect(interval).toHaveValue(60);
  });
