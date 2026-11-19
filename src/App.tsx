@@ -4,6 +4,7 @@ import {Activity,ArrowDownRight,ArrowUpRight,Check,CheckCheck,ChevronRight,Clock
 import type {Api,AttendanceRun,Daemon,Monitor,Project,ProjectProgress,Registry,Settings,Snapshot,History} from './contracts';
 import {api as defaultApi} from './api';
 import DailyProgressChart from './components/charts/DailyProgressChart';
+import {progressMetrics} from './components/charts/progressMetrics';
 import ProgressChart from './components/charts/ProgressChart';
 import DocumentSettings from './knowledge/DocumentSettings';
 import ProjectKnowledge from './knowledge/ProjectKnowledge';
@@ -111,7 +112,15 @@ function ProgressRows({projects,onSelect,onAction,selection}:{projects:ProjectPr
   return <article className="project-list-item" key={p.id}><button className="project-row" type="button" aria-label={p.name+' 상세 열기'} aria-expanded={selection?expanded:undefined} aria-controls={expanded?'project-detail':undefined} ref={expanded?selection?.rowRef:undefined} onClick={()=>onSelect(p)}>
   <span className="project-icon"><FolderKanban size={19}/></span>
   <span className="project-copy"><strong>{p.name}</strong><span>{p.currentTask||'현재 작업 정보가 없습니다.'}</span><ProjectSource project={p} summary/></span>
-  <span className="project-progress"><span className="progress-track"><i style={{width:(p.total?p.verified/p.total*100:0)+'%'}}/><b style={{width:(p.total?p.reportedComplete/p.total*100:0)+'%'}}/></span><span className="progress-caption"><span>검증 완료 {p.verified}</span><span>완료 보고 {p.reportedComplete}</span><span>전체 {p.total}개</span></span></span>
+  <span className="project-progress">
+    <span className="progress-track" aria-hidden="true">
+      {progressMetrics.slice(1).map(({key,color})=><span key={key} style={{width:(p.total?p[key]/p.total*100:0)+'%',backgroundColor:color}}/>)}
+    </span>
+    <span className="progress-caption">
+      {progressMetrics.slice(1).map(({key,label,color})=><span key={key} style={{color}}>{key==='reportedComplete'?'완료 보고':label} {p[key]}</span>)}
+      <span>전체 {p.total}개</span>
+    </span>
+  </span>
   <span className="project-row-end">{p.blocked>0&&<span className="warning-count">막힘 {p.blocked}</span>}<ChevronRight size={17}/></span>
  </button><ProjectActions project={p} onAction={onAction}/></article>;
  })}</div>;
@@ -295,6 +304,7 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
  const projectHistory=detailHistory.result?.state==='ready'?detailHistory.result.history.progress:undefined;
  const title=pages.find(p=>p.id===page)?.label??'개요';
  const progressHistory=useMemo(()=>projectHistory?.filter(p=>p.projectId===selected?.id).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at))??[],[projectHistory,selected?.id]);
+ const latestProgress=progressHistory.at(-1);
  async function submitForm(e:FormEvent<HTMLFormElement>){e.preventDefault();const data=new FormData(e.currentTarget);const id=editing?.id??crypto.randomUUID();const project=form==='project';const value=project?{...editing,id,name:String(data.get('name')),root:String(data.get('root')),checklistPath:String(data.get('checklistPath')||'')}:{...editing,id,name:String(data.get('name')),kind:String(data.get('kind')),source:String(data.get('source')),projectId:String(data.get('projectId')||''),enabled:editing&&'enabled' in editing?editing.enabled:true};const ok=await perform(()=>api.mutate({entity:project?'project':'monitor',action:'upsert',value},baseRevision),'등록했습니다.');if(ok){setForm(null);setEditing(null);}}
  async function save(e:FormEvent){e.preventDefault();if(!settings)return;const valid=/^([01]\d|2[0-3]):[0-5]\d$/;if(!valid.test(settings.startTime)||!valid.test(settings.endTime)||!valid.test(settings.checkoutTime)||settings.startTime>=settings.endTime){setError('올바른 시간과 출근 시간대의 시작·종료 순서를 확인해 주세요.');return;}await perform(async()=>{const result=await api.saveSettings(settings);settingsDirty.current=false;return result;},'설정을 저장했습니다.');}
  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Code2 size={23}/></div><span>DevDock</span></div><nav aria-label="주요 탐색">{pages.map(p=><button key={p.id} aria-current={page===p.id?'page':undefined} className={page===p.id?'selected':''} onClick={()=>{setPage(p.id);setSelected(null);setFilter('');}}><p.icon size={18}/><span>{p.label}</span>{p.id==='projects'&&<small>{activeProjects.length}</small>}</button>)}</nav><div className="sidebar-bottom"><div className="local-tag"><span className="local-dot"/>로컬 워크스페이스</div><div className="version">DevDock <span>v0.1.0</span></div></div></aside>
@@ -358,13 +368,13 @@ export default function App({api=defaultApi,knowledge=defaultKnowledge}:{api?:Ap
     </div>
    </div>
    <ProjectActions project={selected} onAction={setProjectAction}/>
-   <ProjectKnowledge key={selected.id} api={knowledge} project={selected} refreshVersion={snapshotVersion}><div className="detail-summary"><span>전체 {selected.total}개</span><span className={selected.verified?'good-text':undefined}>검증 완료 {selected.verified}</span><span>완료 보고 {selected.reportedComplete}</span><span>막힘 {selected.blocked}</span></div>
+   <ProjectKnowledge key={selected.id} api={knowledge} project={selected} refreshVersion={snapshotVersion}><div className="detail-summary"><span>전체 {selected.total}개</span><span className={selected.verified?'good-text':undefined}>검증 완료 {selected.verified}</span><span>완료 보고 {selected.reportedComplete}</span><span>진행 중 {selected.inProgress}</span><span>막힘 {selected.blocked}</span></div>
    <div className="detail-source"><ProjectSource project={selected}/></div>
    {selected.tasks.length?<ul className="task-list">{selected.tasks.map(t=><li key={t.id}><span className={'task-dot '+t.state}/><span>{t.title}</span><small>{t.verified?'검증 완료':taskLabels[t.state]??t.state}{t.verificationEvidence?.map(e=><span key={e.id}> · {e.kind} · {e.reference} · {e.success?'성공':'실패'} · {e.subjectRevision} · {e.verifiedAt}</span>)}</small></li>)}</ul>:<p className="empty-copy">연결된 상세 작업 목록이 없습니다.</p>}
    <h3 className="detail-subheading">프로젝트 진행 추이</h3>
    {detailHistory.result?.state==='error'?<HistoryError message={detailHistory.result.message} onRetry={detailHistory.retry}/>
     :!detailHistory.result?<p className="empty-copy" role="status">진행 이력을 불러오는 중입니다.</p>
-    :progressHistory.length?<><div className="detail-summary"><span>전체 작업 {progressHistory[progressHistory.length-1].total}</span><span>검증 완료 {progressHistory[progressHistory.length-1].verified}</span><span>완료 보고 {progressHistory[progressHistory.length-1].reportedComplete}</span></div><ProgressChart points={progressHistory}/>{progressHistory.some((p,i)=>i>0&&p.total!==progressHistory[i-1].total)&&<p className="empty-copy">전체 작업 수 변경: {progressHistory.filter((p,i)=>i>0&&p.total!==progressHistory[i-1].total).map(p=>`${time(p.at)} (${p.total}개)`).join(' · ')}</p>}<p className="empty-copy">변경이 기록된 시점만 표시합니다. 수치는 비율이 아닌 작업 개수입니다.</p></>
+    :latestProgress?<><div className="detail-summary"><span>전체 작업 {latestProgress.total}</span><span>검증 완료 {latestProgress.verified}</span><span>완료 보고 {latestProgress.reportedComplete}</span><span>진행 중 {latestProgress.inProgress??'미기록'}</span></div><ProgressChart points={progressHistory}/>{progressHistory.some((p,i)=>i>0&&p.total!==progressHistory[i-1].total)&&<p className="empty-copy">전체 작업 수 변경: {progressHistory.filter((p,i)=>i>0&&p.total!==progressHistory[i-1].total).map(p=>`${time(p.at)} (${p.total}개)`).join(' · ')}</p>}<p className="empty-copy">변경이 기록된 시점만 표시합니다. 수치는 비율이 아닌 작업 개수입니다.</p></>
     :<p className="empty-copy">프로젝트 진행 이력이 아직 없습니다.</p>}
    <h3 className="detail-subheading">현재 Codex 계획</h3>{snapshot.daemons.some(d=>d.plan?.length)?snapshot.daemons.filter(d=>d.plan?.length).map(d=><div key={d.id}><span className="small">{d.name} · 프로젝트 연결 근거를 별도로 확인하세요.</span><ul className="task-list">{d.plan.map((p,i)=><li key={i}><span className={'task-dot '+p.status}/><span>{p.step}</span><small>{taskLabels[p.status]??p.status}</small></li>)}</ul></div>):<p className="empty-copy">관측된 현재 요청의 계획이 없습니다.</p>}
   </ProjectKnowledge></section>}

@@ -483,3 +483,14 @@ describe('DevDock dashboard',()=>{
  it('keeps the checkout prompt open when resolving the answer fails',async()=>{const {api,listeners}=fixture();api.answerCheckout=async()=>{throw new Error('원장 저장 실패');};const user=userEvent.setup();render(<App api={api}/>);await screen.findByText('트레이 동작 구현');listeners.get('checkout-prompt')!({date:'2026-11-17'});await user.click(await screen.findByRole('button',{name:'실행'}));expect(await screen.findByRole('alert')).toHaveTextContent('원장 저장 실패');expect(screen.getByRole('dialog')).toBeInTheDocument();});
 
 });
+
+
+it('shows in-progress counts in the overview card and project detail', async()=>{
+  const {api}=fixture();
+  const user=userEvent.setup();
+  render(<App api={api}/>);
+  const row=await screen.findByRole('button',{name:'DevDock 상세 열기'});
+  expect(within(row).getByText('진행 중 1')).toBeInTheDocument();
+  await user.click(row);
+  expect(screen.getAllByText('진행 중 1')).toHaveLength(2);
+});

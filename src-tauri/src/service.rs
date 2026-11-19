@@ -47,7 +47,7 @@ impl Engine {
         let schema = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(err)?;
-        schema.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS checkin_prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
+        schema.execute_batch("CREATE TABLE IF NOT EXISTS runs(attempt_id TEXT PRIMARY KEY,date TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(date,action)); CREATE TABLE IF NOT EXISTS prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS checkin_prompts(date TEXT PRIMARY KEY,answer INTEGER); CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,daemon_id TEXT NOT NULL,at TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,at TEXT NOT NULL,project_id TEXT NOT NULL,total INTEGER,verified INTEGER,reported INTEGER,collected_date TEXT,in_progress INTEGER); CREATE TABLE IF NOT EXISTS fingerprints(project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL); CREATE TABLE IF NOT EXISTS observation_minutes(daemon_id TEXT NOT NULL,minute TEXT NOT NULL,sample_count INTEGER NOT NULL,success_count INTEGER NOT NULL,failure_count INTEGER NOT NULL,unknown_count INTEGER NOT NULL,latency_sum REAL NOT NULL,latency_count INTEGER NOT NULL,PRIMARY KEY(daemon_id,minute)); CREATE INDEX IF NOT EXISTS idx_observations_source_time ON observations(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_source_time ON events(daemon_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_progress_project_time ON progress(project_id,julianday(at)); CREATE INDEX IF NOT EXISTS idx_events_time ON events(julianday(at));").map_err(err)?;
         schema
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS daily_progress(
@@ -59,6 +59,7 @@ impl Engine {
                 reported INTEGER NOT NULL,
                 tracking_basis TEXT,
                 source_captured_at TEXT,
+                in_progress INTEGER,
                 PRIMARY KEY(project_id,date)
             );
             CREATE INDEX IF NOT EXISTS idx_daily_progress_date ON daily_progress(date);",
@@ -73,6 +74,23 @@ impl Engine {
             schema
                 .execute("ALTER TABLE progress ADD COLUMN collected_date TEXT", [])
                 .map_err(err)?;
+        }
+        for table in ["progress", "daily_progress"] {
+            let has_in_progress = schema
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='in_progress')",
+                    [table],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(err)?;
+            if !has_in_progress {
+                schema
+                    .execute(
+                        &format!("ALTER TABLE {table} ADD COLUMN in_progress INTEGER"),
+                        [],
+                    )
+                    .map_err(err)?;
+            }
         }
         schema.commit().map_err(err)?;
         crate::knowledge::store::initialize(&mut c)?;
@@ -775,8 +793,8 @@ impl Engine {
             .prepare("SELECT data FROM observations WHERE daemon_id=?1 AND julianday(at)>=COALESCE(julianday(?2),0) ORDER BY julianday(at),id")
             .map_err(err)?;
         let points=st.query_map(params![id,cutoff],|r|r.get::<_,String>(0)).map_err(err)?.filter_map(Result::ok).filter_map(|s|serde_json::from_str::<Value>(&s).ok()).map(|v|json!({"at":v["observedAt"],"latencyMs":v["latencyMs"],"value":v["value"],"unit":v["unit"],"metricId":v["metricId"],"state":v["transportState"]})).collect::<Vec<_>>();
-        let mut ps=c.prepare("SELECT at,project_id,total,verified,reported FROM progress WHERE project_id=?1 AND julianday(at)>=COALESCE(julianday(?2),0) ORDER BY julianday(at),id").map_err(err)?;
-        let progress=ps.query_map(params![id,cutoff],|r|Ok(json!({"at":r.get::<_,String>(0)?,"projectId":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"verified":r.get::<_,i64>(3)?,"reportedComplete":r.get::<_,i64>(4)?}))).map_err(err)?.collect::<Result<Vec<_>,_>>().map_err(err)?;
+        let mut ps=c.prepare("SELECT at,project_id,total,verified,reported,in_progress FROM progress WHERE project_id=?1 AND julianday(at)>=COALESCE(julianday(?2),0) ORDER BY julianday(at),id").map_err(err)?;
+        let progress=ps.query_map(params![id,cutoff],|r|Ok(json!({"at":r.get::<_,String>(0)?,"projectId":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"verified":r.get::<_,i64>(3)?,"reportedComplete":r.get::<_,i64>(4)?,"inProgress":r.get::<_,Option<i64>>(5)?}))).map_err(err)?.collect::<Result<Vec<_>,_>>().map_err(err)?;
         let mut ms=c.prepare("SELECT minute,sample_count,success_count,failure_count,unknown_count,latency_sum,latency_count FROM observation_minutes WHERE daemon_id=?1 AND julianday(minute)>=COALESCE(julianday(?2),0) ORDER BY julianday(minute)").map_err(err)?;
         let minutes=ms.query_map(params![id,cutoff],|r|Ok(json!({"at":r.get::<_,String>(0)?,"sampleCount":r.get::<_,i64>(1)?,"successCount":r.get::<_,i64>(2)?,"failureCount":r.get::<_,i64>(3)?,"unknownCount":r.get::<_,i64>(4)?,"latencySum":r.get::<_,f64>(5)?,"latencyCount":r.get::<_,i64>(6)?}))).map_err(err)?.collect::<Result<Vec<_>,_>>().map_err(err)?;
         let days = hours
@@ -798,13 +816,13 @@ impl Engine {
             (first_day.and_time(NaiveTime::MIN).and_utc() - Days::new(1)).to_rfc3339();
         let mut stmt = c
             .prepare(
-                "SELECT collected_date,at,total,verified,reported,NULL,NULL,id,0 AS is_daily
+                "SELECT collected_date,at,total,verified,reported,NULL,NULL,in_progress,id,0 AS is_daily
                    FROM progress
                   WHERE project_id=?1 AND
                         (collected_date BETWEEN ?3 AND ?4 OR
                          (collected_date IS NULL AND (julianday(at)>=julianday(?2) OR julianday(at) IS NULL)))
                  UNION ALL
-                 SELECT date,at,total,verified,reported,tracking_basis,source_captured_at,NULL,1
+                 SELECT date,at,total,verified,reported,tracking_basis,source_captured_at,in_progress,NULL,1
                    FROM daily_progress
                   WHERE project_id=?1 AND date BETWEEN ?3 AND ?4
                  ORDER BY is_daily,id",
@@ -849,6 +867,7 @@ impl Engine {
                         "reportedComplete": row.get::<_, i64>(4).map_err(err)?,
                         "trackingBasis": row.get::<_, Option<String>>(5).map_err(err)?,
                         "sourceCapturedAt": row.get::<_, Option<String>>(6).map_err(err)?,
+                        "inProgress": row.get::<_, Option<i64>>(7).map_err(err)?,
                     }),
                 ),
             );
@@ -1289,7 +1308,8 @@ impl Engine {
             out["total"] = json!(total);
             out["verified"] = json!(verified);
             out["reportedComplete"] = json!(reported);
-            out["inProgress"] = json!(leaves.iter().filter(|t| t["state"] == "inProgress").count());
+            let in_progress = leaves.iter().filter(|t| t["state"] == "inProgress").count();
+            out["inProgress"] = json!(in_progress);
             out["blocked"] = json!(leaves.iter().filter(|t| t["state"] == "blocked").count());
             out["updatedAt"] = Value::Null;
             out["currentTask"] = json!(status
@@ -1307,25 +1327,26 @@ impl Engine {
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(err)?;
                 let accepted = tx.execute(
-                    "INSERT INTO daily_progress(project_id,date,at,total,verified,reported,tracking_basis,source_captured_at)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                    "INSERT INTO daily_progress(project_id,date,at,total,verified,reported,tracking_basis,source_captured_at,in_progress)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
                      ON CONFLICT(project_id,date) DO UPDATE SET
                         at=excluded.at,total=excluded.total,verified=excluded.verified,reported=excluded.reported,
-                        tracking_basis=excluded.tracking_basis,source_captured_at=excluded.source_captured_at
+                        tracking_basis=excluded.tracking_basis,source_captured_at=excluded.source_captured_at,in_progress=excluded.in_progress
                      WHERE excluded.at>=daily_progress.at",
                     params![id,collection_date,collected_at,total as i64,verified as i64,reported as i64,
-                        p["trackingBasis"].as_str(),p["sourceCapturedAt"].as_str()],
+                        p["trackingBasis"].as_str(),p["sourceCapturedAt"].as_str(),in_progress as i64],
                 ).map_err(err)?;
                 if accepted > 0 {
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    "progress in_progress recorded".hash(&mut hasher);
                     out.to_string().hash(&mut hasher);
                     content.hash(&mut hasher);
                     let fingerprint = format!("{:016x}", hasher.finish());
                     let changed=tx.execute("INSERT INTO fingerprints(project_id,fingerprint) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint WHERE fingerprint<>excluded.fingerprint",params![id,fingerprint]).map_err(err)?;
                     if changed > 0 {
                         tx.execute(
-                            "INSERT INTO progress(at,project_id,total,verified,reported,collected_date) VALUES(?1,?2,?3,?4,?5,?6)",
-                            params![collected_at,id,total as i64,verified as i64,reported as i64,collection_date],
+                            "INSERT INTO progress(at,project_id,total,verified,reported,collected_date,in_progress) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                            params![collected_at,id,total as i64,verified as i64,reported as i64,collection_date,in_progress as i64],
                         ).map_err(err)?;
                     }
                 }

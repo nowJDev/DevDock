@@ -472,7 +472,7 @@ impl KnowledgeService {
         through: &str,
     ) -> Result<Value> {
         let history = self.get_project_history(project, "legacy", from, through)?;
-        let hash = super::scanner::sha256(history["points"].to_string().as_bytes());
+        let hash = legacy_archive_hash(&history["points"]);
         let revision = jobs::control(&self.db()?, project)?["revision"].clone();
         Ok(
             json!({"projectId":project,"from":from,"through":through,"points":history["points"],"previewHash":hash,"expectedProjectRevision":revision,"basisId":format!("legacy:{project}")}),
@@ -496,8 +496,7 @@ impl KnowledgeService {
             .map_err(err)?;
         self.require_project(project)?;
         let points = legacy_points(&tx, project, from, through)?;
-        if points.is_empty() || super::scanner::sha256(json!(points).to_string().as_bytes()) != hash
-        {
+        if points.is_empty() || legacy_archive_hash(&json!(points)) != hash {
             return Err("legacy_archive_conflict or no points".into());
         }
         let key = format!("legacy:{project}:{hash}");
@@ -582,6 +581,11 @@ impl KnowledgeService {
                 .collect::<Result<Vec<_>>>()?;
             rows
         };
+        for point in &mut raw {
+            if point["coverage"] == "legacyUnknown" && point["inProgressRecorded"] != true {
+                point["counts"]["inProgress"] = Value::Null;
+            }
+        }
         let mut selected = BTreeMap::<(String, i64), Value>::new();
         let rank = |v: &Value| match v["origin"].as_str() {
             Some("correction") => 3,
@@ -657,8 +661,19 @@ fn replay(c: &Connection, project: &str) -> Result<()> {
     }
     Ok(())
 }
+fn legacy_archive_hash(points: &Value) -> String {
+    let mut normalized = points.clone();
+    for point in normalized.as_array_mut().into_iter().flatten() {
+        // 이전 보관 요청과 같은 기록은 기존 중복 확인 키를 유지한다.
+        if point["inProgressRecorded"] != true {
+            point["counts"]["inProgress"] = json!(0);
+        }
+    }
+    super::scanner::sha256(normalized.to_string().as_bytes())
+}
+
 fn legacy_points(c: &Connection, project: &str, from: &str, through: &str) -> Result<Vec<Value>> {
-    let mut q=c.prepare("SELECT date,at,total,verified,reported FROM daily_progress WHERE project_id=?1 AND date BETWEEN ?2 AND ?3 UNION ALL SELECT collected_date,at,total,verified,reported FROM progress WHERE project_id=?1 ORDER BY 2").map_err(err)?;
+    let mut q=c.prepare("SELECT date,at,total,verified,reported,in_progress FROM daily_progress WHERE project_id=?1 AND date BETWEEN ?2 AND ?3 UNION ALL SELECT collected_date,at,total,verified,reported,in_progress FROM progress WHERE project_id=?1 ORDER BY 2").map_err(err)?;
     let rows = q
         .query_map(params![project, from, through], |r| {
             Ok((
@@ -667,13 +682,14 @@ fn legacy_points(c: &Connection, project: &str, from: &str, through: &str) -> Re
                 r.get::<_, i64>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })
         .map_err(err)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(err)?;
     let mut points = BTreeMap::new();
-    for (date, at, total, verified, reported) in rows {
+    for (date, at, total, verified, reported, in_progress) in rows {
         let Ok(time) = chrono::DateTime::parse_from_rfc3339(&at) else {
             continue;
         };
@@ -686,7 +702,11 @@ fn legacy_points(c: &Connection, project: &str, from: &str, through: &str) -> Re
             .get(&date)
             .map(|v: &(chrono::DateTime<chrono::FixedOffset>, Value)| v.0);
         if old.is_none_or(|old| time >= old) {
-            points.insert(date.clone(),(time,json!({"date":date,"basisVersion":0,"counts":{"total":total,"verified":verified,"reportedComplete":reported,"inProgress":0,"blocked":0},"origin":"observed","coverage":"legacyUnknown","sourceSpans":[],"capturedAt":at})));
+            let mut point = json!({"date":date,"basisVersion":0,"counts":{"total":total,"verified":verified,"reportedComplete":reported,"inProgress":in_progress,"blocked":0},"origin":"observed","coverage":"legacyUnknown","sourceSpans":[],"capturedAt":at});
+            if in_progress.is_some() {
+                point["inProgressRecorded"] = json!(true);
+            }
+            points.insert(date, (time, point));
         }
     }
     Ok(points.into_values().map(|(_, v)| v).collect())

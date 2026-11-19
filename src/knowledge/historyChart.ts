@@ -8,5 +8,5 @@ export function rangeDays(from:string,through:string):number|null{
  const count=(+b-+a)/86400000+1;return Number.isInteger(count)&&count>=1&&count<=366?count:null;
 }
 export function historyChartPoints(history:ProjectHistory,version:number,name:string):DailyProgressPoint[]{
- return history.points.filter(p=>p.basisVersion===version&&p.counts&&(p.coverage==='complete'||p.coverage==='legacyUnknown')).map(p=>({projectId:history.projectId,date:p.date,at:p.capturedAt,total:p.counts!.total,verified:p.counts!.verified,reportedComplete:p.counts!.reportedComplete,trackingBasis:name,basisVersion:p.basisVersion,origin:p.origin,coverage:p.coverage,sourceSpans:p.sourceSpans}));
+ return history.points.filter(p=>p.basisVersion===version&&p.counts&&(p.coverage==='complete'||p.coverage==='legacyUnknown')).map(p=>({projectId:history.projectId,date:p.date,at:p.capturedAt,total:p.counts!.total,verified:p.counts!.verified,reportedComplete:p.counts!.reportedComplete,inProgress:p.counts!.inProgress??null,trackingBasis:name,basisVersion:p.basisVersion,origin:p.origin,coverage:p.coverage,sourceSpans:p.sourceSpans}));
 }

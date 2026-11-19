@@ -209,7 +209,7 @@ fn complete_snapshot_survives_retention_and_observed_is_default() {
 fn explicit_legacy_archive_survives_old_observation_cleanup() {
     let (_d, e, _v) = fixture();
     let db = rusqlite::Connection::open(e.data_dir().join("devdock.sqlite3")).unwrap();
-    db.execute("INSERT INTO daily_progress VALUES('p','2026-01-01','2026-01-01T01:00:00Z',8,0,6,NULL,NULL)",[]).unwrap();
+    db.execute("INSERT INTO daily_progress(project_id,date,at,total,verified,reported) VALUES('p','2026-01-01','2026-01-01T01:00:00Z',8,0,6)",[]).unwrap();
     let k = e.knowledge();
     let preview = k
         .preview_legacy_archive("p", "2026-01-01", "2026-01-31")
@@ -222,12 +222,17 @@ fn explicit_legacy_archive_survives_old_observation_cleanup() {
         preview["previewHash"].as_str().unwrap(),
     )
     .unwrap();
+    db.execute(
+        "UPDATE project_progress_points SET payload=json_set(payload,'$.counts.inProgress',0) WHERE basis_id='legacy:p'",
+        [],
+    ).unwrap();
     e.maintain_history("2026-11-18T12:00:00+09:00").unwrap();
     let h = k
         .get_project_history("p", "legacy:p", "2026-01-01", "2026-01-31")
         .unwrap();
     assert_eq!(h["points"][0]["counts"]["reportedComplete"], 6);
     assert_eq!(h["points"][0]["coverage"], "legacyUnknown");
+    assert!(h["points"][0]["counts"]["inProgress"].is_null());
 }
 
 #[test]

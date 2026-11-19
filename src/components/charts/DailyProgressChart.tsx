@@ -3,6 +3,7 @@ import {useEffect, useId, useMemo, useRef, useState} from 'react';
 import type {EChartsType} from 'echarts/core';
 import type {DailyProgressPoint} from '../../contracts';
 import {dailyProgressRows, type DailyProgressRow} from './dailyProgress';
+import {progressMetrics as metrics} from './progressMetrics';
 
 interface DailyProgressChartProps {
   points: DailyProgressPoint[];
@@ -18,11 +19,6 @@ interface MountedChart {
   observer?: ResizeObserver;
 }
 
-const metrics = [
-  {key: 'total', label: '전체 작업', color: '#A7B5C9', symbolSize: 13, lineType: 'solid'},
-  {key: 'verified', label: '검증 완료', color: '#62B5FF', symbolSize: 9, lineType: 'dashed'},
-  {key: 'reportedComplete', label: '미검증 완료 보고', color: '#FFB454', symbolSize: 6, lineType: 'dotted'},
-] as const;
 
 const chartOptions = {
   animation: false,
@@ -109,14 +105,22 @@ export default function DailyProgressChart({points, days, today, projectName,pro
       xAxis: {data: rows.map(row => row.date)},
       series: metrics.map(metric => ({
         id: metric.key,
-        data: rows.map(row => !row.point?null:provenance?{value:row.point[metric.key],symbol:row.point.origin==='reconstructed'?'diamond':row.point.origin==='correction'?'triangle':'circle',symbolSize:metric.symbolSize}:row.point[metric.key]),
+        data: rows.map(({point}) => {
+          const value = point?.[metric.key];
+          if (!point || value == null) return null;
+          if (!provenance) return value;
+          return {value, symbol: point.origin==='reconstructed'?'diamond':point.origin==='correction'?'triangle':'circle', symbolSize: metric.symbolSize};
+        }),
       })),
-      ...(provenance?{tooltip:{renderMode:'richText',formatter:(params:unknown)=>{
-        const first=Array.isArray(params)?params[0]:params;
-        const index=first&&typeof first==='object'&&'dataIndex' in first?Number(first.dataIndex):-1;
-        const row=rows[index];if(!row?.point)return row?.date??'';
-        const origin=row.point.origin==='observed'?'실제 수집':row.point.origin==='correction'?'명시적 보정':'문서 복원';
-        return `${row.date}\n${origin} · 기준 v${row.point.basisVersion??0}\n전체 ${row.point.total} · 검증 ${row.point.verified} · 미검증 보고 ${row.point.reportedComplete}`;
+      ...(provenance?{tooltip: {renderMode: 'richText', formatter: (params: unknown) => {
+        const first = Array.isArray(params) ? params[0] : params;
+        const index = first && typeof first==='object' && 'dataIndex' in first ? Number(first.dataIndex) : -1;
+        const row = rows[index];
+        if (!row?.point) return row?.date ?? '';
+        const point = row.point;
+        const origin = point.origin==='observed'?'실제 수집':point.origin==='correction'?'명시적 보정':'문서 복원';
+        const title = [row.date, origin+' · 기준 v'+(point.basisVersion??0)];
+        return [...title,...metrics.map(metric=>metric.label+' '+(point[metric.key]??'미기록'))].join('\n');
       }}}:{}),
     };
 
@@ -221,7 +225,7 @@ export default function DailyProgressChart({points, days, today, projectName,pro
               <tr key={date}>
                 <th scope="row">{onSelectDate?<button type="button" className="text-button" aria-label={date+' 근거 보기'} onClick={()=>onSelectDate(date)}>{date}</button>:date}</th>
                 {point ? <>
-                  {metrics.map(metric => <td key={metric.key}>{point[metric.key]}</td>)}
+                  {metrics.map(metric => <td key={metric.key}>{point[metric.key]??'미기록'}</td>)}
                   <td><time dateTime={point.at}>{collectionTime.format(new Date(point.at))}</time></td>
                   <td>{point.trackingBasis?.trim() ? point.trackingBasis : '미기록'}</td>
                   <td><SourceTime value={point.sourceCapturedAt}/></td>

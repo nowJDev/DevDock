@@ -87,6 +87,7 @@ describe('DailyProgressChart', () => {
       total: 7,
       verified: 3,
       reportedComplete: 2,
+      inProgress: 1,
     });
     const points = [point('2026-02-09'), first, point(today, {at: '2026-03-10T00:00:00+09:00'}), latest];
     const {rerender} = render(<DailyProgressChart points={points} days={7} today={today} projectName="DevDock"/>);
@@ -102,6 +103,7 @@ describe('DailyProgressChart', () => {
         expect.objectContaining({name: '전체 작업', connectNulls: false, data: [0, null, null, null, null, null, 7]}),
         expect.objectContaining({name: '검증 완료', connectNulls: false, data: [0, null, null, null, null, null, 3]}),
         expect.objectContaining({name: '미검증 완료 보고', connectNulls: false, data: [0, null, null, null, null, null, 2]}),
+        expect.objectContaining({name: '진행 중', connectNulls: false, data: [null, null, null, null, null, null, 1]}),
       ],
     })));
 
@@ -111,15 +113,15 @@ describe('DailyProgressChart', () => {
     const table = screen.getByRole('table', {name: 'DevDock 일별 진행현황'});
     expect(within(table).getAllByRole('row')).toHaveLength(8);
     expect(within(table).getAllByRole('columnheader').map(header => header.textContent)).toEqual([
-      '날짜', '전체 작업', '검증 완료', '미검증 완료 보고', '마지막 수집 시각', '집계 기준', '자료 기준',
+      '날짜', '전체 작업', '검증 완료', '미검증 완료 보고', '진행 중', '마지막 수집 시각', '집계 기준', '자료 기준',
     ]);
     const firstRow = within(table).getByRole('row', {name: /2026-03-04/});
-    expect(within(firstRow).getAllByRole('cell').map(cell => cell.textContent).slice(0, 3)).toEqual(['0', '0', '0']);
+    expect(within(firstRow).getAllByRole('cell').map(cell => cell.textContent).slice(0, 4)).toEqual(['0', '0', '0', '미기록']);
     const missing = within(table).getByRole('row', {name: /2026-03-05/});
     expect(within(missing).getByText('미수집')).toBeInTheDocument();
     expect(within(missing).queryByText('0')).toBeNull();
     const lastRow = within(table).getByRole('row', {name: /^2026-03-10/});
-    expect(within(lastRow).getAllByRole('cell').map(cell => cell.textContent).slice(0, 3)).toEqual(['7', '3', '2']);
+    expect(within(lastRow).getAllByRole('cell').map(cell => cell.textContent).slice(0, 4)).toEqual(['7', '3', '2', '1']);
     expect(lastRow.querySelector('time')).toHaveAttribute('datetime', latest.at);
 
     rerender(<DailyProgressChart points={points} days={30} today={today} projectName="DevDock"/>);
@@ -168,14 +170,14 @@ describe('DailyProgressChart', () => {
     const instance = echarts.init(null, undefined, {renderer: 'svg', ssr: true, width: 640, height: 260});
     chart.init.mockReturnValue(instance);
     const points = [
-      point('2026-03-08', {origin: 'observed'}),
-      point('2026-03-09', {origin: 'reconstructed'}),
-      point(today, {origin: 'correction'}),
+      point('2026-03-08', {origin: 'observed', inProgress: 0}),
+      point('2026-03-09', {origin: 'reconstructed', inProgress: 0}),
+      point(today, {origin: 'correction', inProgress: 0}),
     ];
     render(<DailyProgressChart points={points} days={3} today={today} projectName="DevDock" provenance/>);
 
     await waitFor(() => expect(instance.getOption()).toMatchObject({
-      series: [4, 1, 2].map(value => expect.objectContaining({
+      series: [4, 1, 2, 0].map(value => expect.objectContaining({
         data: ['circle', 'diamond', 'triangle'].map(symbol => expect.objectContaining({value, symbol})),
       })),
     }));
@@ -187,9 +189,9 @@ describe('DailyProgressChart', () => {
       !path.hasAttribute('ecmeta_ssr_type') &&
       path.getAttribute('fill-opacity') !== '0',
     );
-    expect(visibleSwatches).toHaveLength(3);
+    expect(visibleSwatches).toHaveLength(4);
     expect(visibleSwatches.every(swatch => swatch.hasAttribute('stroke'))).toBe(true);
-    expect(new Set(visibleSwatches.map(swatch => swatch.getAttribute('stroke-dasharray'))).size).toBe(3);
+    expect(new Set(visibleSwatches.map(swatch => swatch.getAttribute('stroke-dasharray'))).size).toBe(4);
   });
 
   it('shows historical collection bases and warns only when known bases differ in the selected period', async () => {
@@ -211,7 +213,7 @@ describe('DailyProgressChart', () => {
     expect(within(earlyRow).getByRole('cell', {name: '기능 단위'})).toBeInTheDocument();
     expect(within(earlyRow).getByText('2026-02-08')).toHaveAttribute('datetime', '2026-02-08');
     const legacyRow = within(table).getByRole('row', {name: /^2026-03-04/});
-    expect(within(legacyRow).getAllByRole('cell', {name: '미기록'})).toHaveLength(2);
+    expect(within(legacyRow).getAllByRole('cell', {name: '미기록'})).toHaveLength(3);
     const lastRow = within(table).getByRole('row', {name: /^2026-03-10/});
     expect(within(lastRow).getByRole('cell', {name: 'UAT 항목 단위'})).toBeInTheDocument();
     const recordedTimes = lastRow.querySelectorAll('time');

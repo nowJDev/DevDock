@@ -221,7 +221,7 @@ fn daily_progress_keeps_only_the_latest_observation_including_metadata() {
     assert_eq!(
         daily[0],
         json!({"projectId":"p","date":today,"at":daily[0]["at"],"total":2,"verified":0,
-            "reportedComplete":1,"trackingBasis":"Fixture checklist","sourceCapturedAt":"2026-01-02T03:04:05Z"})
+            "reportedComplete":1,"inProgress":0,"trackingBasis":"Fixture checklist","sourceCapturedAt":"2026-01-02T03:04:05Z"})
     );
     assert!(chrono::DateTime::parse_from_rfc3339(daily[0]["at"].as_str().unwrap()).is_ok());
     assert_eq!(history["progress"].as_array().unwrap().len(), 2);
