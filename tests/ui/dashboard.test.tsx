@@ -494,3 +494,15 @@ it('shows in-progress counts in the overview card and project detail', async()=>
   await user.click(row);
   expect(screen.getAllByText('진행 중 1')).toHaveLength(2);
 });
+
+
+it('keeps the current runtime summary without an activity feed or history page', async()=>{
+  const {api,snapshot}=fixture();
+  snapshot.events=[{id:'example',daemonId:'A',type:'turn/started',at:snapshot.now,message:'활동 테스트 이벤트'}];
+  render(<App api={api}/>);
+  expect(await screen.findByRole('heading',{name:'런타임 현재 상태'})).toBeInTheDocument();
+  const navigation=screen.getByRole('navigation',{name:'주요 탐색'});
+  expect(within(navigation).queryByRole('button',{name:'활동 이력'})).toBeNull();
+  expect(screen.queryByRole('heading',{name:'최근 활동'})).toBeNull();
+  expect(screen.queryByText('활동 테스트 이벤트')).toBeNull();
+});
